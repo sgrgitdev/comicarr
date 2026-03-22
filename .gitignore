@@ -54,6 +54,11 @@ images/generated-*.png
 .claude/
 AGENTS.md
 
+# Internal planning docs (compound-engineering plugin)
+docs/plans/
+docs/solutions/
+docs/brainstorms/
+
 # Pencil design files
 *.pen
 
