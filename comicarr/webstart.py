@@ -31,6 +31,75 @@ from comicarr.api import REST
 from comicarr.helpers import create_https_certificates
 from comicarr.webserve import WebInterface
 
+# Setup mode paths allowed before initial credentials are configured
+_SETUP_ALLOWED_PATHS = ("/auth/setup", "/auth/check_setup", "/assets", "/favicon.ico")
+
+
+def _check_setup_gate():
+    """CherryPy tool: block all requests except setup-related paths when first-run setup is pending."""
+    if comicarr.SETUP_TOKEN is None:
+        return
+    path = cherrypy.request.path_info
+    for allowed in _SETUP_ALLOWED_PATHS:
+        if path == allowed or path.startswith(allowed + "/"):
+            return
+    raise cherrypy.HTTPError(503, "Setup required. Please configure credentials via the setup page.")
+
+
+cherrypy.tools.setup_gate = cherrypy.Tool("before_handler", _check_setup_gate, priority=10)
+
+
+def _set_samesite_cookie():
+    """CherryPy tool: add SameSite=Strict to session cookies (not natively supported in CherryPy 18.x)."""
+    name = cherrypy.request.config.get("tools.sessions.name", "session_id")
+    cookie = cherrypy.serving.response.cookie
+    if name in cookie:
+        cookie[name]["samesite"] = "Strict"
+
+
+cherrypy.tools.samesite = cherrypy.Tool("before_finalize", _set_samesite_cookie, priority=60)
+
+
+_CSRF_EXEMPT_PREFIXES = ("/api", "/auth/login", "/auth/login_json", "/auth/setup")
+
+
+def _csrf_protect():
+    """CherryPy tool: require X-Requested-With header on state-changing requests.
+    Combined with SameSite=Strict cookies, this provides CSRF protection.
+    Cross-origin requests with custom headers trigger CORS preflight, which is rejected.
+    Exempt: /api (uses API key), /auth/login* (login form), /auth/setup (uses setup token)."""
+    if cherrypy.request.method in ("POST", "PUT", "DELETE", "PATCH"):
+        path = cherrypy.request.path_info
+        for prefix in _CSRF_EXEMPT_PREFIXES:
+            if path == prefix or path.startswith(prefix + "/"):
+                return
+        if cherrypy.request.headers.get("X-Requested-With") != "ComicarrFrontend":
+            raise cherrypy.HTTPError(403, "CSRF validation failed")
+
+
+cherrypy.tools.csrf = cherrypy.Tool("before_handler", _csrf_protect, priority=20)
+
+
+def _make_bcrypt_checkpassword(user_pass_dict):
+    """Create a checkpassword callable that handles bcrypt hashes for HTTP Basic Auth.
+    CherryPy's built-in checkpassword_dict does plaintext comparison which breaks after
+    bcrypt migration."""
+    from comicarr import encrypted
+
+    def checkpassword(realm, username, password):
+        stored = user_pass_dict.get(username)
+        if stored is None:
+            return False
+        if stored.startswith("$2b$") or stored.startswith("$2a$"):
+            return encrypted.verify_password(password, stored)
+        if stored.startswith("^~$z$"):
+            edc = encrypted.Encryptor(stored, logon=True)
+            ed_chk = edc.decrypt_it()
+            return ed_chk["status"] is True and ed_chk["password"] == password
+        return password == stored
+
+    return checkpassword
+
 
 def initialize(options):
 
@@ -52,6 +121,22 @@ def initialize(options):
             logger.warn("Disabled HTTPS because of missing certificate and key.")
             enable_https = False
 
+    # Build Content-Security-Policy header
+    csp = "; ".join(
+        [
+            "default-src 'self'",
+            "script-src 'self'",
+            "style-src 'self' 'unsafe-inline'",
+            "img-src 'self' data: https://comicvine.gamespot.com",
+            "font-src 'self'",
+            "connect-src 'self'",
+            "frame-ancestors 'none'",
+            "base-uri 'self'",
+            "form-action 'self'",
+            "object-src 'none'",
+        ]
+    )
+
     options_dict = {
         "server.socket_port": options["http_port"],
         "server.socket_host": options["http_host"],
@@ -62,10 +147,18 @@ def initialize(options):
         "tools.decode.on": True,
         "log.screen": options["cherrypy_logging"],
         "engine.autoreload.on": False,
+        "tools.setup_gate.on": True,
+        "tools.samesite.on": True,
+        "tools.csrf.on": True,
         "tools.response_headers.on": True,
         "tools.response_headers.headers": [
             ("X-Content-Type-Options", "nosniff"),
             ("X-Frame-Options", "DENY"),
+            ("Referrer-Policy", "strict-origin-when-cross-origin"),
+            ("Permissions-Policy", "camera=(), microphone=(), geolocation=()"),
+            ("Cross-Origin-Opener-Policy", "same-origin"),
+            ("X-XSS-Protection", "0"),
+            ("Content-Security-Policy-Report-Only", csp),
         ],
     }
 
@@ -120,6 +213,8 @@ def initialize(options):
             conf["/"].update(
                 {
                     "tools.sessions.on": True,
+                    "tools.sessions.httponly": True,
+                    "tools.sessions.secure": enable_https,
                     "tools.auth.on": True,
                     "tools.sessions.timeout": options["login_timeout"],
                     "auth.forms_username": options["http_username"],
@@ -151,7 +246,7 @@ def initialize(options):
                 {
                     "tools.auth_basic.on": True,
                     "tools.auth_basic.realm": "Comicarr",
-                    "tools.auth_basic.checkpassword": cherrypy.lib.auth_basic.checkpassword_dict(
+                    "tools.auth_basic.checkpassword": _make_bcrypt_checkpassword(
                         {options["http_username"]: options["http_password"]}
                     ),
                 }
@@ -160,24 +255,30 @@ def initialize(options):
 
     rest_api = {
         "/": {
-            # the api uses restful method dispatching
             "request.dispatch": cherrypy.dispatch.MethodDispatcher(),
-            # all api calls require that the client passes HTTP basic authentication
             "tools.auth_basic.on": False,
+            "tools.auth.on": False,
+            "tools.rest_auth.on": True,
+            "tools.response_headers.on": True,
+            "tools.response_headers.headers": [("Content-Type", "application/json")],
         }
     }
 
-    if options["opds_authentication"]:
+    # Enable OPDS auth if explicitly configured OR if main auth is enabled
+    opds_auth = options["opds_authentication"] or (
+        options.get("authentication", 0) > 0 and options["http_password"] is not None
+    )
+    if opds_auth:
         user_list = {}
-        if len(options["opds_username"]) > 0:
+        if options.get("opds_username") and len(options["opds_username"]) > 0:
             user_list[options["opds_username"]] = options["opds_password"]
-        if options["http_password"] is not None and options["http_username"] != options["opds_username"]:
+        if options["http_password"] is not None and options.get("http_username") != options.get("opds_username"):
             user_list[options["http_username"]] = options["http_password"]
         conf["/opds"] = {
             "tools.auth.on": False,
             "tools.auth_basic.on": True,
             "tools.auth_basic.realm": "Comicarr OPDS",
-            "tools.auth_basic.checkpassword": cherrypy.lib.auth_basic.checkpassword_dict(user_list),
+            "tools.auth_basic.checkpassword": _make_bcrypt_checkpassword(user_list),
         }
     else:
         conf["/opds"] = {"tools.auth_basic.on": False, "tools.auth.on": False}

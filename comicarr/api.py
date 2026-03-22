@@ -19,6 +19,7 @@
 #  along with Comicarr.  If not, see <http://www.gnu.org/licenses/>.
 
 import datetime
+import hmac
 import json
 import os
 import queue
@@ -52,6 +53,17 @@ from comicarr import (
 )
 
 from . import cache
+
+
+def check_rest_api_key():
+    """CherryPy tool that validates Api-Key header for the /rest mount."""
+    api_key = cherrypy.request.headers.get("Api-Key", "")
+    if not api_key or not hmac.compare_digest(api_key, str(comicarr.CONFIG.API_KEY)):
+        raise cherrypy.HTTPError(401, "Valid Api-Key header required")
+
+
+cherrypy.tools.rest_auth = cherrypy.Tool("before_handler", check_rest_api_key)
+
 
 cmd_list = [
     "getIndex",
@@ -234,25 +246,25 @@ class Api(object):
             self.apitype = "normal"
         else:
             if not comicarr.CONFIG.API_ENABLED:
-                if kwargs["apikey"] != comicarr.DOWNLOAD_APIKEY and kwargs["apikey"] != comicarr.SSE_KEY:
+                dl_match = comicarr.DOWNLOAD_APIKEY and hmac.compare_digest(kwargs["apikey"], comicarr.DOWNLOAD_APIKEY)
+                sse_match = comicarr.SSE_KEY and hmac.compare_digest(kwargs["apikey"], comicarr.SSE_KEY)
+                if not dl_match and not sse_match:
                     self.data = self._failureResponse("API not enabled")
                     return
 
-            if kwargs["apikey"] != comicarr.CONFIG.API_KEY and all(
-                [
-                    kwargs["apikey"] != comicarr.SSE_KEY,
-                    kwargs["apikey"] != comicarr.DOWNLOAD_APIKEY,
-                    comicarr.DOWNLOAD_APIKEY is not None,
-                ]
-            ):
+            api_match = hmac.compare_digest(kwargs["apikey"], str(comicarr.CONFIG.API_KEY))
+            sse_match = comicarr.SSE_KEY and hmac.compare_digest(kwargs["apikey"], comicarr.SSE_KEY)
+            dl_match = comicarr.DOWNLOAD_APIKEY and hmac.compare_digest(kwargs["apikey"], comicarr.DOWNLOAD_APIKEY)
+
+            if not api_match and not sse_match and not dl_match:
                 self.data = self._failureResponse("Incorrect API key")
                 return
             else:
-                if kwargs["apikey"] == comicarr.CONFIG.API_KEY:
+                if api_match:
                     self.apitype = "normal"
-                elif kwargs["apikey"] == comicarr.DOWNLOAD_APIKEY:
+                elif dl_match:
                     self.apitype = "download"
-                elif kwargs["apikey"] == comicarr.SSE_KEY:
+                elif sse_match:
                     self.apitype = "sse"
                 self.apikey = kwargs.pop("apikey")
 
@@ -372,6 +384,8 @@ class Api(object):
         FROM readlist"
 
     def _getAPI(self, **kwargs):
+        from comicarr.auth import _rate_limiter
+
         if "username" not in kwargs:
             self.data = self._failureResponse("Missing parameter: username & password MUST be enabled.")
             return
@@ -388,19 +402,37 @@ class Api(object):
             self.data = self._failureResponse("Unable to use this command - username & password MUST be enabled.")
             return
 
+        # Rate limit getAPI the same as login
+        ip = cherrypy.request.remote.ip
+        if _rate_limiter.is_locked_out(ip):
+            self.data = self._failureResponse("Incorrect username or password.")
+            return
+
         ht_user = comicarr.CONFIG.HTTP_USERNAME
-        edc = encrypted.Encryptor(comicarr.CONFIG.HTTP_PASSWORD)
-        ed_chk = edc.decrypt_it()
-        if comicarr.CONFIG.ENCRYPT_PASSWORDS is True:
-            if username == ht_user and all([ed_chk["status"] is True, ed_chk["password"] == password]):
-                self.data = self._successResponse({"apikey": comicarr.CONFIG.API_KEY, "sse_key": comicarr.SSE_KEY})
-            else:
-                self.data = self._failureResponse("Incorrect username or password.")
+        stored_pass = comicarr.CONFIG.HTTP_PASSWORD
+
+        if not hmac.compare_digest(username, ht_user):
+            _rate_limiter.record_failure(ip)
+            self.data = self._failureResponse("Incorrect username or password.")
+            return
+
+        # Three-state password verification (mirrors auth.py check_credentials)
+        verified = False
+        if stored_pass and (stored_pass.startswith("$2b$") or stored_pass.startswith("$2a$")):
+            verified = encrypted.verify_password(password, stored_pass)
+        elif stored_pass and stored_pass.startswith("^~$z$"):
+            edc = encrypted.Encryptor(stored_pass, logon=True)
+            ed_chk = edc.decrypt_it()
+            verified = ed_chk["status"] is True and ed_chk["password"] == password
         else:
-            if username == ht_user and password == comicarr.CONFIG.HTTP_PASSWORD:
-                self.data = self._successResponse({"apikey": comicarr.CONFIG.API_KEY, "sse_key": comicarr.SSE_KEY})
-            else:
-                self.data = self._failureResponse("Incorrect username or password.")
+            verified = password == stored_pass
+
+        if verified:
+            _rate_limiter.record_success(ip)
+            self.data = self._successResponse({"apikey": comicarr.CONFIG.API_KEY, "sse_key": comicarr.SSE_KEY})
+        else:
+            _rate_limiter.record_failure(ip)
+            self.data = self._failureResponse("Incorrect username or password.")
 
     def _getIndex(self, **kwargs):
         # Support pagination via limit and offset parameters
@@ -1192,11 +1224,11 @@ class Api(object):
 
     def _seriesjsonListing(self, **kwargs):
         if "missing" in kwargs:
-            json_present = "WHERE seriesjsonPresent = 0 OR seriesjsonPresent is NULL"
+            msj_query = (
+                "SELECT comicid, ComicLocation FROM comics WHERE seriesjsonPresent = 0 OR seriesjsonPresent is NULL"
+            )
         else:
-            json_present = None
-        db.DBConnection()
-        msj_query = "SELECT comicid, ComicLocation FROM comics {json_present}".format(json_present=json_present)
+            msj_query = "SELECT comicid, ComicLocation FROM comics"
         results = self._resultsFromQuery(msj_query)
         if len(results) > 0:
             self.data = self._successResponse(results)
@@ -3057,23 +3089,18 @@ class REST(object):
     def __init__(self):
         pass
 
-    class verify_api(object):
-        def __init__(self):
-            pass
+    @staticmethod
+    def _dic_from_query(query, args=None):
+        """Shared helper for REST endpoints — returns list of dicts from a SQL query."""
+        myDB = db.DBConnection()
+        rows = myDB.select(query, args)
 
-        def validate(self):
-            logger.info("attempting to validate...")
-            req = cherrypy.request.headers
-            logger.info("thekey: %s" % req)
-            logger.info("url: %s" % cherrypy.url())
-            logger.fdebug("apikey validation: match=%s" % (req.get("Api-Key") == str(comicarr.CONFIG.API_KEY)))
-            if "Api-Key" not in req or req["Api-Key"] != str(
-                comicarr.CONFIG.API_KEY
-            ):  # str(comicarr.API_KEY) or comicarr.API_KEY not in cherrypy.url():
-                logger.info("wrong APIKEY")
-                return "api-key provided was either not present in auth header, or was incorrect."
-            else:
-                return True
+        rows_as_dic = []
+        for row in rows:
+            row_as_dic = dict(list(zip(list(row.keys()), row, strict=False)))
+            rows_as_dic.append(row_as_dic)
+
+        return rows_as_dic
 
     class Watchlist(object):
         exposed = True
@@ -3082,17 +3109,6 @@ class REST(object):
             pass
 
         def GET(self):
-            va = REST.verify_api()
-            vchk = va.validate()
-            if vchk is not True:
-                return "api-key provided was either not present in auth header, or was incorrect."
-            # rows_as_dic = []
-
-            # for row in rows:
-            #    row_as_dic = dict(zip(row.keys(), row))
-            #    rows_as_dic.append(row_as_dic)
-
-            # return rows_as_dic
             some = helpers.havetotals()
             return json.dumps(some)
 
@@ -3102,31 +3118,9 @@ class REST(object):
         def __init__(self):
             pass
 
-        def _dic_from_query(self, query):
-            myDB = db.DBConnection()
-            rows = myDB.select(query)
-
-            rows_as_dic = []
-
-            for row in rows:
-                row_as_dic = dict(list(zip(list(row.keys()), row, strict=False)))
-                rows_as_dic.append(row_as_dic)
-
-            return rows_as_dic
-
         def GET(self):
-            va = REST.verify_api()
-            vchk = va.validate()
-            if vchk is not True:
-                return "api-key provided was either not present in auth header, or was incorrect."
-            # req = cherrypy.request.headers
-            # logger.info('thekey: %s' % req)
-            # if 'api-key' not in req or req['api-key'] != 'hello':
-            #    logger.info('wrong APIKEY')
-            #    return('api-key provided was either not present in auth header, or was incorrect.')
-
-            self.comics = self._dic_from_query("SELECT * from comics order by ComicSortName COLLATE NOCASE")
-            return "Here are all the comics we have: %s" % self.comics
+            comics = REST._dic_from_query("SELECT * from comics order by ComicSortName COLLATE NOCASE")
+            return json.dumps(comics, ensure_ascii=False)
 
     @cherrypy.popargs("comic_id", "issuemode", "issue_id")
     class Comic(object):
@@ -3135,48 +3129,24 @@ class REST(object):
         def __init__(self):
             pass
 
-        def _dic_from_query(self, query):
-            myDB = db.DBConnection()
-            rows = myDB.select(query)
-
-            rows_as_dic = []
-
-            for row in rows:
-                row_as_dic = dict(list(zip(list(row.keys()), row, strict=False)))
-                rows_as_dic.append(row_as_dic)
-
-            return rows_as_dic
-
         def GET(self, comic_id=None, issuemode=None, issue_id=None):
-            va = REST.verify_api()
-            vchk = va.validate()
-            if vchk is not True:
-                return "api-key provided was either not present in auth header, or was incorrect."
-
-            # req = cherrypy.request.headers
-            # logger.info('thekey: %s' % req)
-            # if 'api-key' not in req or req['api-key'] != 'hello':
-            #    logger.info('wrong APIKEY')
-            #    return('api-key provided was either not present in auth header, or was incorrect.')
-
-            self.comics = self._dic_from_query("SELECT * from comics order by ComicSortName COLLATE NOCASE")
-
             if comic_id is None:
-                return "No valid ComicID entered"
-            else:
-                if issuemode is None:
-                    match = [c for c in self.comics if comic_id == c["ComicID"]]
-                    if match:
-                        return json.dumps(match, ensure_ascii=False)
-                    else:
-                        return "No Comic with the ID %s :-(" % comic_id
-                elif issuemode == "issues":
-                    self.issues = self._dic_from_query('SELECT * from issues where comicid="' + comic_id + '"')
-                    return json.dumps(self.issues, ensure_ascii=False)
-                elif issuemode == "issue" and issue_id is not None:
-                    self.issues = self._dic_from_query(
-                        'SELECT * from issues where comicid="' + comic_id + '" and issueid="' + issue_id + '"'
-                    )
-                    return json.dumps(self.issues, ensure_ascii=False)
+                comics = REST._dic_from_query("SELECT * from comics order by ComicSortName COLLATE NOCASE")
+                return json.dumps(comics, ensure_ascii=False)
+
+            if issuemode is None:
+                match = REST._dic_from_query("SELECT * from comics WHERE ComicID=?", [comic_id])
+                if match:
+                    return json.dumps(match, ensure_ascii=False)
                 else:
-                    return "Nothing to do."
+                    return json.dumps({"error": "No Comic with that ID"})
+            elif issuemode == "issues":
+                issues = REST._dic_from_query("SELECT * from issues WHERE comicid=?", [comic_id])
+                return json.dumps(issues, ensure_ascii=False)
+            elif issuemode == "issue" and issue_id is not None:
+                issues = REST._dic_from_query(
+                    "SELECT * from issues WHERE comicid=? AND issueid=?", [comic_id, issue_id]
+                )
+                return json.dumps(issues, ensure_ascii=False)
+            else:
+                return json.dumps({"error": "Nothing to do."})

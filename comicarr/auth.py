@@ -24,12 +24,15 @@
 # Session tool to be loaded.
 ###### from cherrypy/tools on github
 
+import hmac
 import threading
+import time
 import urllib.error
 import urllib.parse
 
 # from datetime import datetime, timedelta
 import urllib.request
+from collections import defaultdict
 
 import cherrypy
 
@@ -39,23 +42,105 @@ from comicarr import encrypted, logger
 SESSION_KEY = "_cp_username"
 
 
+class LoginRateLimiter(object):
+    def __init__(self, max_attempts=5, lockout_seconds=300):
+        self._attempts = defaultdict(list)
+        self._lock = threading.Lock()
+        self.max_attempts = max_attempts
+        self.lockout_seconds = lockout_seconds
+
+    def is_locked_out(self, ip):
+        with self._lock:
+            now = time.monotonic()
+            cutoff = now - self.lockout_seconds
+            recent = [t for t in self._attempts[ip] if t > cutoff]
+            if recent:
+                self._attempts[ip] = recent
+            else:
+                self._attempts.pop(ip, None)
+            return len(recent) >= self.max_attempts
+
+    def record_failure(self, ip):
+        with self._lock:
+            self._attempts[ip].append(time.monotonic())
+            # Evict stale entries if dict grows too large (IP spray defense)
+            if len(self._attempts) > 10000:
+                self._prune_stale()
+
+    def _prune_stale(self):
+        """Remove all expired entries. Called under lock."""
+        now = time.monotonic()
+        cutoff = now - self.lockout_seconds
+        stale_ips = [ip for ip, times in self._attempts.items() if not any(t > cutoff for t in times)]
+        for ip in stale_ips:
+            del self._attempts[ip]
+
+    def record_success(self, ip):
+        with self._lock:
+            self._attempts.pop(ip, None)
+
+
+# Module-level rate limiter instance shared across all login endpoints
+_rate_limiter = LoginRateLimiter()
+
+
 def check_credentials(username, password):
     """Verifies credentials for username and password.
     Returns None on success or a string describing the error on failure"""
-    # Adapt to your needs
+    # Check rate limit BEFORE any password verification (prevents CPU waste from bcrypt)
+    ip = cherrypy.request.remote.ip
+    if _rate_limiter.is_locked_out(ip):
+        logger.info("[AUTH] Login attempt blocked (rate limited) from IP: %s" % ip)
+        return "Incorrect username or password."
+
     forms_user = cherrypy.request.config["auth.forms_username"]
     forms_pass = cherrypy.request.config["auth.forms_password"]
-    edc = encrypted.Encryptor(forms_pass, logon=True)
-    ed_chk = edc.decrypt_it()
-    if comicarr.CONFIG.ENCRYPT_PASSWORDS is True:
-        if username == forms_user and all([ed_chk["status"] is True, ed_chk["password"] == password]):
+
+    if not hmac.compare_digest(username, forms_user):
+        _rate_limiter.record_failure(ip)
+        logger.info("[AUTH-AUDIT] Failed login attempt — invalid username from IP: %s" % ip)
+        return "Incorrect username or password."
+
+    # Three-state password verification:
+    # 1. $2b$/$2a$ prefix → bcrypt hash, verify with bcrypt.checkpw()
+    # 2. ^~$z$ prefix → legacy base64, decode and compare, then re-hash
+    # 3. No prefix → plaintext, compare directly, then hash
+    if forms_pass and (forms_pass.startswith("$2b$") or forms_pass.startswith("$2a$")):
+        if encrypted.verify_password(password, forms_pass):
+            _rate_limiter.record_success(ip)
+            logger.info("[AUTH-AUDIT] Successful login for user '%s' from IP: %s" % (username, ip))
             return None
         else:
+            _rate_limiter.record_failure(ip)
+            logger.info("[AUTH-AUDIT] Failed login attempt — wrong password for user '%s' from IP: %s" % (username, ip))
+            return "Incorrect username or password."
+    elif forms_pass and forms_pass.startswith("^~$z$"):
+        edc = encrypted.Encryptor(forms_pass, logon=True)
+        ed_chk = edc.decrypt_it()
+        if ed_chk["status"] is True and ed_chk["password"] == password:
+            new_hash = encrypted.hash_password(password)
+            comicarr.CONFIG.process_kwargs({"http_password": new_hash})
+            comicarr.CONFIG.writeconfig()
+            logger.info("[AUTH] Password migrated from base64 to bcrypt")
+            _rate_limiter.record_success(ip)
+            logger.info("[AUTH-AUDIT] Successful login for user '%s' from IP: %s" % (username, ip))
+            return None
+        else:
+            _rate_limiter.record_failure(ip)
+            logger.info("[AUTH-AUDIT] Failed login attempt — wrong password for user '%s' from IP: %s" % (username, ip))
             return "Incorrect username or password."
     else:
-        if username == forms_user and password == forms_pass:
+        if password == forms_pass:
+            new_hash = encrypted.hash_password(password)
+            comicarr.CONFIG.process_kwargs({"http_password": new_hash})
+            comicarr.CONFIG.writeconfig()
+            logger.info("[AUTH] Password migrated from plaintext to bcrypt")
+            _rate_limiter.record_success(ip)
+            logger.info("[AUTH-AUDIT] Successful login for user '%s' from IP: %s" % (username, ip))
             return None
         else:
+            _rate_limiter.record_failure(ip)
+            logger.info("[AUTH-AUDIT] Failed login attempt — wrong password for user '%s' from IP: %s" % (username, ip))
             return "Incorrect username or password."
 
 
@@ -93,55 +178,6 @@ def require(*conditions):
         return f
 
     return decorate
-
-
-# Conditions are callables that return True
-# if the user fulfills the conditions they define, False otherwise
-#
-# They can access the current username as cherrypy.request.login
-#
-# Define those at will however suits the application.
-
-
-def member_of(groupname):
-    def check():
-        # replace with actual check if <username> is in <groupname>
-        return cherrypy.request.login == "joe" and groupname == "admin"
-
-    return check
-
-
-def name_is(reqd_username):
-    return lambda: reqd_username == cherrypy.request.login
-
-
-# These might be handy
-
-
-def any_of(*conditions):
-    """Returns True if any of the conditions match"""
-
-    def check():
-        for c in conditions:
-            if c():
-                return True
-        return False
-
-    return check
-
-
-# By default all conditions are required, but this might still be
-# needed if you want to use it inside of an any_of(...) condition
-def all_of(*conditions):
-    """Returns True if all of the conditions match"""
-
-    def check():
-        for c in conditions:
-            if not c():
-                return False
-        return True
-
-    return check
 
 
 # Controller to provide login and logout actions
@@ -258,7 +294,7 @@ class AuthController(object):
 
     @cherrypy.expose
     @cherrypy.tools.json_out()
-    def setup(self, username=None, password=None):
+    def setup(self, username=None, password=None, setup_token=None):
         """First-run credential setup. Only works if no auth is configured."""
         # Restrict to POST only to prevent CSRF via GET
         if cherrypy.request.method != "POST":
@@ -271,17 +307,25 @@ class AuthController(object):
             if comicarr.CONFIG.HTTP_USERNAME and comicarr.CONFIG.HTTP_PASSWORD:
                 return {"success": False, "error": "Credentials already configured"}
 
+            # Require setup token when one is active (prevents LAN attacker from completing setup)
+            if comicarr.SETUP_TOKEN is not None:
+                if not setup_token or not hmac.compare_digest(setup_token, comicarr.SETUP_TOKEN):
+                    return {"success": False, "error": "Invalid setup token. Check the server console log."}
+
             if not username or not password:
                 return {"success": False, "error": "Username and password required"}
 
             if len(password) < 8:
                 return {"success": False, "error": "Password must be at least 8 characters"}
 
+            # Hash password before storing — never write plaintext to config
+            hashed_password = encrypted.hash_password(password)
+
             # Save credentials via process_kwargs (handles ConfigParser sync)
             comicarr.CONFIG.process_kwargs(
                 {
                     "http_username": username,
-                    "http_password": password,
+                    "http_password": hashed_password,
                     "authentication": 2,  # Form-based auth
                 }
             )
@@ -289,6 +333,9 @@ class AuthController(object):
             comicarr.CONFIG.configure(update=True, startup=False)
 
             logger.info("[AUTH-SETUP] Initial credentials configured for user: %s" % username)
+
+            # Clear the setup token — setup is complete
+            comicarr.SETUP_TOKEN = None
 
             # CherryPy sessions are configured at mount time based on whether auth
             # is set. A server restart is needed for login/sessions to work.
