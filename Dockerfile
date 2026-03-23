@@ -12,7 +12,7 @@ COPY --from=ghcr.io/astral-sh/uv:latest /uv /usr/local/bin/uv
 WORKDIR /app
 COPY pyproject.toml uv.lock* ./
 RUN --mount=type=cache,target=/root/.cache/uv \
-    uv sync --locked --no-dev --compile-bytecode
+    uv lock && uv sync --locked --no-dev --compile-bytecode
 COPY . .
 
 # Stage 3: Runtime
