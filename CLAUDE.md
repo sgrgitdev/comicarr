@@ -60,6 +60,22 @@ Releases are automated via release-please. **Do NOT manually create tags, bump v
 - Config: `release-please-config.json` and `.release-please-manifest.json`
 - Docker images publish to `ghcr.io/frankieramirez/comicarr`
 
+## Branch & PR Conventions
+
+**Branch names** must use a conventional prefix with `/` separator:
+- `feat/description` — new features
+- `fix/description` — bug fixes
+- `refactor/description` — code restructuring
+- `docs/description` — documentation only
+- `chore/description` — maintenance, deps, CI
+
+**PR titles** must follow conventional commit format — CI enforces this:
+- `feat: Add manga search provider`
+- `fix: Correct metadata parsing for annuals`
+- `refactor: Extract search deduplication logic`
+
+This is required because release-please parses PR titles (via squash merge) to determine version bumps and generate changelogs. A `feat:` PR bumps minor, a `fix:` PR bumps patch.
+
 ## Anti-Patterns / What NOT to Do
 
 - **Do NOT use type hints** - None exist in the codebase currently

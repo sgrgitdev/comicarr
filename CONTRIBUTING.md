@@ -84,22 +84,26 @@ All new Python files must include the GPL v3 license header at the top.
 
 ## Pull Request Process
 
-1. Create a feature branch from `main`
+1. Create a feature branch from `main` using a conventional prefix:
+   ```
+   feat/add-manga-search
+   fix/metadata-parsing
+   refactor/search-deduplication
+   docs/api-guide
+   chore/update-deps
+   ```
 2. Make your changes with clear, conventional commit messages
 3. Ensure all tests pass and linting is clean
-4. Open a PR with a clear description of what and why
+4. Open a PR — **the title must follow conventional commit format** (CI enforces this):
+   ```
+   feat: Add manga search provider
+   fix: Correct metadata parsing for annual issues
+   refactor: Extract search result deduplication
+   docs: Update API configuration guide
+   ```
 5. Fill out the PR template
 
-### Commit Message Format
-
-Use [conventional commits](https://www.conventionalcommits.org/):
-
-```
-feat: add new download client support
-fix: correct metadata parsing for annual issues
-refactor: extract search result deduplication
-docs: update API configuration guide
-```
+PR titles matter because release-please parses them (via squash merge) to determine version bumps and generate changelogs.
 
 ## Releases
 
