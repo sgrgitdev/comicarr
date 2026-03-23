@@ -1130,31 +1130,6 @@ class Config(object):
             else:
                 pass
 
-        if self.ENCRYPT_PASSWORDS is True:
-            self.encrypt_items(mode="encrypt")
-
-        # Migrate login password to bcrypt on startup (handles all three states)
-        if self.HTTP_PASSWORD and not (self.HTTP_PASSWORD.startswith("$2b$") or self.HTTP_PASSWORD.startswith("$2a$")):
-            # Backup config before credential migration
-            backup_path = os.path.join(self.SECURE_DIR, "config.ini.pre-security-migration.bak")
-            if not os.path.exists(backup_path):
-                try:
-                    import shutil
-
-                    shutil.copy2(self._config_file, backup_path)
-                    logger.info("[SECURITY] Pre-migration backup saved to %s" % backup_path)
-                except Exception as e:
-                    logger.error("[SECURITY] Failed to create pre-migration backup: %s" % e)
-
-            new_hash = encrypted.migrate_password(self.HTTP_PASSWORD)
-            if new_hash:
-                self.HTTP_PASSWORD = new_hash
-                config.set("Interface", "http_password", new_hash)
-                self.ENCRYPT_PASSWORDS = True
-                config.set("General", "encrypt_passwords", "True")
-                self.WRITE_THE_CONFIG = True
-                logger.info("[SECURITY] Login password migrated to bcrypt")
-
     def writeconfig(self, values=None, startup=False):
         logger.fdebug("Writing configuration to file")
         config.set("Newznab", "extra_newznabs", ", ".join(self.write_extras(self.EXTRA_NEWZNABS)))
@@ -1384,6 +1359,30 @@ class Config(object):
                     "Credential encryption will not work. Fix permissions and restart." % self.SECURE_DIR
                 )
                 raise SystemExit(1)
+
+        # Encrypt plaintext credentials now that SECURE_DIR is available
+        if self.ENCRYPT_PASSWORDS is True:
+            self.encrypt_items(mode="encrypt")
+
+        # Migrate login password to bcrypt on startup (handles all three states)
+        if self.HTTP_PASSWORD and not (self.HTTP_PASSWORD.startswith("$2b$") or self.HTTP_PASSWORD.startswith("$2a$")):
+            # Backup config before credential migration
+            backup_path = os.path.join(self.SECURE_DIR, "config.ini.pre-security-migration.bak")
+            if not os.path.exists(backup_path):
+                try:
+                    shutil.copy2(self._config_file, backup_path)
+                    logger.info("[SECURITY] Pre-migration backup saved to %s" % backup_path)
+                except Exception as e:
+                    logger.error("[SECURITY] Failed to create pre-migration backup: %s" % e)
+
+            new_hash = encrypted.migrate_password(self.HTTP_PASSWORD)
+            if new_hash:
+                self.HTTP_PASSWORD = new_hash
+                config.set("Interface", "http_password", new_hash)
+                self.ENCRYPT_PASSWORDS = True
+                config.set("General", "encrypt_passwords", "True")
+                self.WRITE_THE_CONFIG = True
+                logger.info("[SECURITY] Login password migrated to bcrypt")
 
         # Startup security permission checks
         if startup and not update:
