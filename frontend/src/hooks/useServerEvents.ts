@@ -17,12 +17,10 @@ type UseServerEventsReturn = {
 };
 
 /**
- * Hook to manage Server-Sent Events (SSE) connection for real-time updates
+ * Hook to manage Server-Sent Events (SSE) connection for real-time updates.
+ * Auth is handled by the JWT cookie — no separate SSE key needed.
  */
-export function useServerEvents(
-  sseKey: string | null,
-  enabled = true,
-): UseServerEventsReturn {
+export function useServerEvents(enabled = true): UseServerEventsReturn {
   const queryClient = useQueryClient();
   const { addToast } = useToast();
   const [isConnected, setIsConnected] = useState(false);
@@ -35,7 +33,7 @@ export function useServerEvents(
   const hasConnectedRef = useRef(false); // Track if we've connected before
 
   useEffect(() => {
-    if (!enabled || !sseKey) {
+    if (!enabled) {
       return;
     }
 
@@ -49,7 +47,7 @@ export function useServerEvents(
         eventSourceRef.current.close();
       }
 
-      const apiUrl = `/api?cmd=checkGlobalMessages&apikey=${sseKey}`;
+      const apiUrl = `/api/events/stream`;
       console.log("[SSE] Connecting to:", apiUrl);
 
       const evtSource = new EventSource(apiUrl);
@@ -62,7 +60,7 @@ export function useServerEvents(
 
         // Only verify session on reconnect, not initial connection
         if (hasConnectedRef.current) {
-          fetch("/auth/check_session")
+          fetch("/api/auth/check-session")
             .then((r) => r.json())
             .then((data) => {
               if (!data.authenticated) {
@@ -394,7 +392,7 @@ export function useServerEvents(
         eventSourceRef.current = null;
       }
     };
-  }, [sseKey, enabled, queryClient, addToast]);
+  }, [enabled, queryClient, addToast]);
 
   return { isConnected, isReconnecting };
 }

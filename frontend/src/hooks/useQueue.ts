@@ -5,7 +5,7 @@ import {
   type UseQueryResult,
   type UseMutationResult,
 } from "@tanstack/react-query";
-import { apiCall } from "@/lib/api";
+import { apiRequest } from "@/lib/api";
 import type { WantedIssue, UpcomingIssue, PaginationMeta } from "@/types";
 
 interface WantedResponse {
@@ -20,9 +20,9 @@ export function useUpcoming(
   return useQuery({
     queryKey: ["upcoming", includeDownloaded],
     queryFn: () =>
-      apiCall<UpcomingIssue[]>(
-        "getUpcoming",
-        includeDownloaded ? { include_downloaded_issues: "Y" } : {},
+      apiRequest<UpcomingIssue[]>(
+        "GET",
+        `/api/upcoming${includeDownloaded ? "?include_downloaded_issues=true" : ""}`,
       ),
     staleTime: 2 * 60 * 1000, // 2 minutes (more frequent than series)
   });
@@ -34,7 +34,11 @@ export function useWanted(
 ): UseQueryResult<WantedResponse> {
   return useQuery({
     queryKey: ["wanted", limit, offset],
-    queryFn: () => apiCall<WantedResponse>("getWanted", { limit, offset }),
+    queryFn: () =>
+      apiRequest<WantedResponse>(
+        "GET",
+        `/api/wanted?limit=${limit}&offset=${offset}`,
+      ),
     staleTime: 2 * 60 * 1000,
   });
 }
@@ -43,7 +47,7 @@ export function useWanted(
 export function useForceSearch(): UseMutationResult<unknown, Error, void> {
   const queryClient = useQueryClient();
   return useMutation({
-    mutationFn: () => apiCall("forceSearch"),
+    mutationFn: () => apiRequest("POST", "/api/search/force"),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["wanted"] });
       queryClient.invalidateQueries({ queryKey: ["upcoming"] });
@@ -57,7 +61,7 @@ export function useBulkQueueIssues(): UseMutationResult<void, Error, string[]> {
     mutationFn: async (issueIds: string[]) => {
       // Process sequentially to avoid rate limiting
       for (const id of issueIds) {
-        await apiCall("queueIssue", { id });
+        await apiRequest("PUT", `/api/series/issues/${id}/queue`);
       }
     },
     onSuccess: () => {
@@ -78,7 +82,7 @@ export function useBulkUnqueueIssues(): UseMutationResult<
     mutationFn: async (issueIds: string[]) => {
       // Process sequentially to avoid rate limiting
       for (const id of issueIds) {
-        await apiCall("unqueueIssue", { id });
+        await apiRequest("PUT", `/api/series/issues/${id}/unqueue`);
       }
     },
     onSuccess: () => {

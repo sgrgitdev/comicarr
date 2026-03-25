@@ -3,28 +3,14 @@
  * Handles all API calls to the Comicarr backend
  */
 
-import type {
-  ApiParams,
-  LoginResponse,
-  LogoutResponse,
-  SessionResponse,
-} from "@/types";
+import type { LoginResponse, LogoutResponse, SessionResponse } from "@/types";
 
-const API_BASE = "/api";
-const AUTH_BASE = "/auth";
+const AUTH_BASE = "/api/auth";
 
 /** Common headers for all requests — includes CSRF protection header */
 const COMMON_HEADERS: Record<string, string> = {
   "X-Requested-With": "ComicarrFrontend",
 };
-
-interface ApiResponseData {
-  success?: boolean;
-  data?: unknown;
-  error?: {
-    message?: string;
-  };
-}
 
 /**
  * User-friendly error messages for common HTTP status codes
@@ -109,55 +95,6 @@ export function isRetryableError(error: unknown): boolean {
 }
 
 /**
- * Make an API call to Comicarr
- */
-export async function apiCall<T = unknown>(
-  cmd: string,
-  params: ApiParams = {},
-): Promise<T> {
-  const url = new URL(API_BASE, window.location.origin);
-  url.searchParams.set("cmd", cmd);
-
-  // Add API key from sessionStorage (except for getAPI command)
-  if (cmd !== "getAPI") {
-    const apiKey = sessionStorage.getItem("comicarr_api_key");
-    if (apiKey) {
-      url.searchParams.set("apikey", apiKey);
-    }
-  }
-
-  // Add additional parameters
-  Object.entries(params).forEach(([key, value]) => {
-    if (value !== undefined && value !== null) {
-      url.searchParams.set(key, String(value));
-    }
-  });
-
-  try {
-    const response = await fetch(url, {
-      headers: COMMON_HEADERS,
-      credentials: "include", // Send session cookies
-    });
-
-    if (!response.ok) {
-      throw new ApiError(response.status);
-    }
-
-    const data: ApiResponseData = await response.json();
-
-    // Comicarr API returns {success: true/false, data: {...}, error: {...}}
-    if (data.success === false) {
-      throw new Error(data.error?.message || "API call failed");
-    }
-
-    return (data.data ?? data) as T;
-  } catch (error) {
-    console.error("API call failed:", { cmd, params, error });
-    throw error;
-  }
-}
-
-/**
  * Login with username and password
  */
 export async function login(
@@ -165,19 +102,16 @@ export async function login(
   password: string,
 ): Promise<LoginResponse> {
   try {
-    const url = new URL(`${AUTH_BASE}/login_json`, window.location.origin);
+    const url = new URL(`${AUTH_BASE}/login`, window.location.origin);
 
     const response = await fetch(url, {
       method: "POST",
       headers: {
         ...COMMON_HEADERS,
-        "Content-Type": "application/x-www-form-urlencoded",
+        "Content-Type": "application/json",
       },
-      body: new URLSearchParams({
-        username,
-        password,
-      }),
-      credentials: "include", // Receive session cookies
+      body: JSON.stringify({ username, password }),
+      credentials: "include", // Receive JWT cookie
     });
 
     if (!response.ok) {
@@ -200,7 +134,7 @@ export async function login(
  */
 export async function logout(): Promise<LogoutResponse> {
   try {
-    const url = new URL(`${AUTH_BASE}/logout_json`, window.location.origin);
+    const url = new URL(`${AUTH_BASE}/logout`, window.location.origin);
 
     const response = await fetch(url, {
       method: "POST",
@@ -228,7 +162,7 @@ export async function logout(): Promise<LogoutResponse> {
  */
 export async function checkSession(): Promise<SessionResponse> {
   try {
-    const url = new URL(`${AUTH_BASE}/check_session`, window.location.origin);
+    const url = new URL(`${AUTH_BASE}/check-session`, window.location.origin);
 
     const response = await fetch(url, {
       credentials: "include",
@@ -251,7 +185,7 @@ export async function checkSession(): Promise<SessionResponse> {
  */
 export async function checkSetup(): Promise<{ needs_setup: boolean }> {
   try {
-    const url = new URL(`${AUTH_BASE}/check_setup`, window.location.origin);
+    const url = new URL(`${AUTH_BASE}/check-setup`, window.location.origin);
     const response = await fetch(url, {
       headers: COMMON_HEADERS,
       credentials: "include",
@@ -276,17 +210,17 @@ export async function setupCredentials(
 ): Promise<{ success: boolean; error?: string; username?: string }> {
   try {
     const url = new URL(`${AUTH_BASE}/setup`, window.location.origin);
-    const params: Record<string, string> = { username, password };
+    const body: Record<string, string> = { username, password };
     if (setupToken) {
-      params.setup_token = setupToken;
+      body.setup_token = setupToken;
     }
     const response = await fetch(url, {
       method: "POST",
       headers: {
         ...COMMON_HEADERS,
-        "Content-Type": "application/x-www-form-urlencoded",
+        "Content-Type": "application/json",
       },
-      body: new URLSearchParams(params),
+      body: JSON.stringify(body),
       credentials: "include",
     });
     if (!response.ok) {
@@ -303,13 +237,56 @@ export async function setupCredentials(
 }
 
 /**
+ * Make a RESTful API request to FastAPI endpoints.
+ *
+ * All API calls go through this function. Auth is handled by
+ * the JWT session cookie (credentials: "include").
+ */
+export async function apiRequest<T = unknown>(
+  method: "GET" | "POST" | "PUT" | "DELETE" | "PATCH",
+  path: string,
+  body?: Record<string, unknown> | null,
+): Promise<T> {
+  const url = new URL(path, window.location.origin);
+
+  const options: RequestInit = {
+    method,
+    headers: {
+      ...COMMON_HEADERS,
+    },
+    credentials: "include",
+  };
+
+  if (body && method !== "GET") {
+    (options.headers as Record<string, string>)["Content-Type"] =
+      "application/json";
+    options.body = JSON.stringify(body);
+  }
+
+  try {
+    const response = await fetch(url, options);
+
+    if (!response.ok) {
+      throw new ApiError(response.status);
+    }
+
+    const data = await response.json();
+    return data as T;
+  } catch (error) {
+    console.error("API request failed:", { method, path, error });
+    throw error;
+  }
+}
+
+/**
  * Get cover image URL for a Metron series (lazy loading)
  */
 export async function getSeriesImage(seriesId: string): Promise<string | null> {
   try {
-    const response = await apiCall<{ image: string | null }>("getSeriesImage", {
-      id: seriesId,
-    });
+    const response = await apiRequest<{ image: string | null }>(
+      "GET",
+      `/api/metadata/series-image/${seriesId}`,
+    );
     return response.image;
   } catch (error) {
     console.error("Failed to fetch series image:", error);
