@@ -15,7 +15,6 @@ Module-level functions (not classes) — matches existing codebase style.
 
 import datetime
 import os
-import queue
 import re
 import shutil
 import threading
@@ -267,20 +266,19 @@ def delete_import(ctx, imp_ids):
 
 
 def refresh_import(ctx):
-    """Trigger an import directory scan in the background."""
-    from comicarr import librarysync
+    """Trigger an import inbox scan in the background."""
+    from comicarr import importinbox
 
     import_dir = getattr(comicarr.CONFIG, "IMPORT_DIR", None) if comicarr.CONFIG else None
     if not import_dir:
         return {"success": False, "error": "Import directory not configured"}
 
     try:
-        logger.info("[SERIES-IMPORT] Starting import directory scan for: %s" % import_dir)
-        import_queue = queue.Queue()
-        threading.Thread(target=librarysync.scanLibrary, name="API-ImportScan", args=[import_dir, import_queue]).start()
-        return {"success": True, "message": "Import scan started for: %s" % import_dir}
+        logger.info("[IMPORT-INBOX] Starting import inbox scan for: %s" % import_dir)
+        threading.Thread(target=importinbox.inboxScan, name="API-InboxScan").start()
+        return {"success": True, "message": "Import inbox scan started for: %s" % import_dir}
     except Exception as e:
-        logger.error("[SERIES-IMPORT] Error: %s" % e)
+        logger.error("[IMPORT-INBOX] Error: %s" % e)
         return {"success": False, "error": "Failed to start import scan: %s" % str(e)}
 
 
@@ -299,6 +297,49 @@ def manga_library_scan(ctx):
     except Exception as e:
         logger.error("[MANGA-SCAN] Error: %s" % e)
         return {"success": False, "error": "Failed to start manga scan: %s" % str(e)}
+
+
+def manga_scan_confirm(ctx, selected_ids, scan_id):
+    """Confirm and import selected manga series from scan results."""
+    from comicarr import mangasync
+
+    if not selected_ids:
+        return {"success": False, "error": "No series selected"}
+
+    if not scan_id:
+        return {"success": False, "error": "Missing scan_id"}
+
+    return mangasync.import_selected_manga(selected_ids, scan_id)
+
+
+def comic_library_scan(ctx):
+    """Trigger a comic library scan in the background."""
+    from comicarr import comicsync
+
+    comic_dir = getattr(comicarr.CONFIG, "COMIC_DIR", None) if comicarr.CONFIG else None
+    if not comic_dir:
+        return {"success": False, "error": "Comic directory not configured"}
+
+    try:
+        logger.info("[COMIC-SCAN] Starting comic library scan for: %s" % comic_dir)
+        threading.Thread(target=comicsync.comicScan, name="API-ComicScan").start()
+        return {"success": True, "message": "Comic scan started for: %s" % comic_dir}
+    except Exception as e:
+        logger.error("[COMIC-SCAN] Error: %s" % e)
+        return {"success": False, "error": "Failed to start comic scan: %s" % str(e)}
+
+
+def comic_scan_confirm(ctx, selected_ids, scan_id):
+    """Confirm and import selected comic series from scan results."""
+    from comicarr import comicsync
+
+    if not selected_ids:
+        return {"success": False, "error": "No series selected"}
+
+    if not scan_id:
+        return {"success": False, "error": "Missing scan_id"}
+
+    return comicsync.import_selected_series(selected_ids, scan_id)
 
 
 # --- Extracted from helpers.py ---

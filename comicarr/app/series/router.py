@@ -312,6 +312,75 @@ def manga_scan_progress(ctx: AppContext = Depends(get_context)):
     return mangasync.get_scan_progress()
 
 
+@router.post("/import/manga/confirm", dependencies=[Depends(require_session)])
+def manga_scan_confirm(
+    request_body: dict = None,
+    ctx: AppContext = Depends(get_context),
+):
+    """Confirm and import selected manga from scan results."""
+    if request_body is None:
+        request_body = {}
+
+    selected_ids = request_body.get("selected_ids", [])
+    scan_id = request_body.get("scan_id")
+
+    if not isinstance(selected_ids, list) or not all(isinstance(i, str) for i in selected_ids):
+        return JSONResponse(status_code=400, content={"detail": "selected_ids must be a list of strings"})
+    if not selected_ids:
+        return JSONResponse(status_code=400, content={"detail": "No series selected"})
+    if not scan_id or not isinstance(scan_id, str):
+        return JSONResponse(status_code=400, content={"detail": "Missing or invalid scan_id"})
+
+    result = series_service.manga_scan_confirm(ctx, selected_ids, scan_id)
+    if not result["success"]:
+        status = 409 if result.get("stale") else 400
+        return JSONResponse(status_code=status, content={"detail": result.get("error")})
+    return result
+
+
+@router.post("/import/comic/scan", dependencies=[Depends(require_session)])
+def comic_scan(ctx: AppContext = Depends(get_context)):
+    """Trigger a comic library scan."""
+    result = series_service.comic_library_scan(ctx)
+    if not result["success"]:
+        return JSONResponse(status_code=400, content={"detail": result.get("error")})
+    return result
+
+
+@router.get("/import/comic/progress", dependencies=[Depends(require_session)])
+def comic_scan_progress(ctx: AppContext = Depends(get_context)):
+    """Get comic scan progress."""
+    from comicarr import comicsync
+
+    return comicsync.get_scan_progress()
+
+
+@router.post("/import/comic/confirm", dependencies=[Depends(require_session)])
+def comic_scan_confirm(
+    request_body: dict = None,
+    ctx: AppContext = Depends(get_context),
+):
+    """Confirm and import selected comics from scan results."""
+    if request_body is None:
+        request_body = {}
+
+    selected_ids = request_body.get("selected_ids", [])
+    scan_id = request_body.get("scan_id")
+
+    if not isinstance(selected_ids, list) or not all(isinstance(i, str) for i in selected_ids):
+        return JSONResponse(status_code=400, content={"detail": "selected_ids must be a list of strings"})
+    if not selected_ids:
+        return JSONResponse(status_code=400, content={"detail": "No series selected"})
+    if not scan_id or not isinstance(scan_id, str):
+        return JSONResponse(status_code=400, content={"detail": "Missing or invalid scan_id"})
+
+    result = series_service.comic_scan_confirm(ctx, selected_ids, scan_id)
+    if not result["success"]:
+        status = 409 if result.get("stale") else 400
+        return JSONResponse(status_code=status, content={"detail": result.get("error")})
+    return result
+
+
 # ---------------------------------------------------------------------------
 # REST-compat endpoints (migrated from legacy /rest mount)
 # ---------------------------------------------------------------------------

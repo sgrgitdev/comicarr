@@ -25,12 +25,14 @@ Mirrors librarysync.py but for manga content.
 import os
 import re
 import threading
+import time
 
 from sqlalchemy import select
 
 import comicarr
 from comicarr import db, logger
 from comicarr.manga_parser import parse_manga_filename
+from comicarr.scanutil import COMIC_EXTENSIONS, find_best_match
 from comicarr.tables import comics, issues
 
 # Scan status globals (for UI polling)
@@ -45,9 +47,13 @@ MANGA_SCAN_PROGRESS = {
     "errors": [],
 }
 
+# Scan results held for user selection (new series only)
+MANGA_SCAN_RESULTS = None
+MANGA_SCAN_ID = None
+
 _SCAN_LOCK = threading.Lock()
 
-MANGA_EXTENSIONS = (".cbr", ".cbz", ".cb7", ".pdf")
+MANGA_EXTENSIONS = COMIC_EXTENSIONS
 
 
 def mangaScan(scan_dir=None, queue=None):
@@ -55,11 +61,15 @@ def mangaScan(scan_dir=None, queue=None):
 
     Walks the directory tree, groups files by series (using parent directory
     name), parses filenames for chapter/volume info, matches series against
-    MangaDex, and populates the library.
+    MangaDex/MAL metadata.
+
+    Series already in the library have their chapters auto-marked as downloaded.
+    New/unmatched series are collected into MANGA_SCAN_RESULTS for user
+    selection instead of auto-importing.
 
     Returns dict with scan results.
     """
-    global MANGA_SCAN_STATUS, MANGA_SCAN_PROGRESS
+    global MANGA_SCAN_STATUS, MANGA_SCAN_PROGRESS, MANGA_SCAN_RESULTS, MANGA_SCAN_ID
 
     if not _SCAN_LOCK.acquire(blocking=False):
         logger.warning("[MANGA-SCAN] Scan already in progress, skipping")
@@ -86,6 +96,8 @@ def mangaScan(scan_dir=None, queue=None):
         "current_series": None,
         "errors": [],
     }
+    MANGA_SCAN_RESULTS = None
+    MANGA_SCAN_ID = None
 
     logger.info("[MANGA-SCAN] Starting manga library scan: %s" % manga_dir)
 
@@ -93,8 +105,9 @@ def mangaScan(scan_dir=None, queue=None):
         "status": "completed",
         "series_found": 0,
         "series_matched": 0,
-        "series_imported": 0,
+        "existing_updated": 0,
         "chapters_marked_downloaded": 0,
+        "scan_results": [],
         "unmatched_series": [],
         "errors": [],
     }
@@ -107,30 +120,52 @@ def mangaScan(scan_dir=None, queue=None):
         results["series_found"] = len(series_map)
         logger.info("[MANGA-SCAN] Found %d series directories" % len(series_map))
 
-        # Step 2: For each series, try to match against MangaDex and import
+        # Step 2: For each series, check existing or match against providers
         for series_name, files in series_map.items():
             MANGA_SCAN_PROGRESS["current_series"] = series_name
 
             try:
-                match_result = _match_and_import_series(series_name, files)
-                if match_result["matched"]:
-                    results["series_matched"] += 1
-                    results["series_imported"] += 1
-                    results["chapters_marked_downloaded"] += match_result.get("chapters_downloaded", 0)
-                    MANGA_SCAN_PROGRESS["series_matched"] += 1
+                # Check if series already exists in library — auto-update chapters
+                existing_result = _check_existing_series(series_name, files)
+                if existing_result:
+                    results["existing_updated"] += 1
+                    results["chapters_marked_downloaded"] += existing_result.get("chapters_downloaded", 0)
                     MANGA_SCAN_PROGRESS["series_imported"] += 1
                 else:
-                    results["unmatched_series"].append(series_name)
+                    # New series — match against providers, collect for user selection
+                    match_result = _match_series(series_name, files)
+                    results["scan_results"].append(match_result)
+                    if match_result.get("matched"):
+                        results["series_matched"] += 1
+                        MANGA_SCAN_PROGRESS["series_matched"] += 1
+                    else:
+                        results["unmatched_series"].append(series_name)
             except Exception as e:
                 logger.error("[MANGA-SCAN] Error processing series '%s': %s" % (series_name, e))
+                error_entry = {
+                    "series_name": series_name,
+                    "file_count": len(files),
+                    "matched": False,
+                    "error": str(e),
+                }
+                results["scan_results"].append(error_entry)
                 results["errors"].append({"series": series_name, "error": str(e)})
                 MANGA_SCAN_PROGRESS["errors"].append(str(e))
 
             MANGA_SCAN_PROGRESS["processed_files"] += len(files)
 
+        # Store new series results for user selection
+        MANGA_SCAN_ID = str(int(time.time()))
+        MANGA_SCAN_RESULTS = results["scan_results"]
+
         logger.info(
-            "[MANGA-SCAN] Scan complete. Matched: %d/%d series, %d chapters marked downloaded"
-            % (results["series_matched"], results["series_found"], results["chapters_marked_downloaded"])
+            "[MANGA-SCAN] Scan complete. Existing updated: %d, New matched: %d/%d, %d chapters marked downloaded"
+            % (
+                results["existing_updated"],
+                results["series_matched"],
+                results["series_found"],
+                results["chapters_marked_downloaded"],
+            )
         )
     except Exception as e:
         logger.error("[MANGA-SCAN] Fatal error during scan: %s" % e)
@@ -194,44 +229,16 @@ def _guess_series_from_filename(filename):
 
 
 def _find_best_match(series_name, results):
-    """Find the best matching result from a search results list.
+    """Find the best matching result from a search results list."""
+    return find_best_match(series_name, results)
 
-    Checks primary title and alt titles for each result using fuzzy matching.
 
-    Returns (best_match_dict, best_score) or (None, 0.0).
+def _check_existing_series(series_name, files):
+    """Check if a manga series already exists in the library.
+
+    If it does, auto-mark chapters as downloaded.
+    Returns result dict if series exists, None otherwise.
     """
-    best_match = None
-    best_score = 0.0
-    normalized_search = _normalize_title(series_name)
-
-    for result in results:
-        candidate_names = [result.get("name", "")]
-        candidate_names.extend(result.get("alt_titles", []))
-
-        for candidate in candidate_names:
-            if not candidate:
-                continue
-            normalized_candidate = _normalize_title(candidate)
-
-            if normalized_search == normalized_candidate:
-                return result, 1.0
-
-            score = _name_similarity(series_name, candidate)
-            if score > best_score:
-                best_score = score
-                best_match = result
-
-    return best_match, best_score
-
-
-def _match_and_import_series(series_name, files):
-    """Match a series against MAL (if enabled) or MangaDex and import it.
-
-    Returns dict with 'matched' bool and details.
-    """
-    from comicarr import importer, mangadex
-
-    # Check if series already exists in library by name
     with db.get_engine().connect() as conn:
         stmt = select(comics).where(
             comics.c.ComicName == series_name,
@@ -242,7 +249,24 @@ def _match_and_import_series(series_name, files):
     if existing:
         logger.info("[MANGA-SCAN] Series '%s' already in library, updating chapter statuses" % series_name)
         chapters_downloaded = _mark_chapters_downloaded(existing["ComicID"], files)
-        return {"matched": True, "chapters_downloaded": chapters_downloaded, "already_existed": True}
+        return {"chapters_downloaded": chapters_downloaded, "comic_id": existing["ComicID"]}
+
+    return None
+
+
+def _match_series(series_name, files):
+    """Match a series against MAL/MangaDex and return structured result.
+
+    Does NOT import — returns match information for user selection.
+    """
+    from comicarr import mangadex
+
+    result = {
+        "series_name": series_name,
+        "file_count": len(files),
+        "matched": False,
+        "match": None,
+    }
 
     # Try MAL first if enabled
     mal_enabled = getattr(comicarr.CONFIG, "MAL_ENABLED", False)
@@ -259,105 +283,67 @@ def _match_and_import_series(series_name, files):
                 if best_match and best_score >= 0.6:
                     manga_id = best_match.get("comicid", "")
                     if manga_id:
+                        confidence = int(best_score * 100)
                         if best_score < 1.0:
                             logger.info(
-                                "[MANGA-SCAN] MAL fuzzy match for '%s' -> '%s' (%.1f%%)"
-                                % (series_name, best_match.get("name", ""), best_score * 100)
+                                "[MANGA-SCAN] MAL fuzzy match for '%s' -> '%s' (%d%%)"
+                                % (series_name, best_match.get("name", ""), confidence)
                             )
-                        logger.info(
-                            "[MANGA-SCAN] Matched '%s' to MAL: %s (%s)"
-                            % (series_name, best_match.get("name", ""), manga_id)
-                        )
-                        importer.addMangaToDB_MAL(manga_id)
-                        chapters_downloaded = _mark_chapters_downloaded(manga_id, files)
-                        return {
-                            "matched": True,
-                            "chapters_downloaded": chapters_downloaded,
+                        result["matched"] = True
+                        result["match"] = {
+                            "comicid": manga_id,
+                            "name": best_match.get("name", ""),
+                            "year": best_match.get("comicyear", ""),
+                            "image": best_match.get("comicthumb") or best_match.get("comicimage"),
+                            "confidence": confidence,
                             "source": "mal",
-                            "matched_name": best_match.get("name", ""),
                         }
+                        return result
         except Exception as e:
             logger.error("[MANGA-SCAN] MAL search failed for '%s': %s" % (series_name, e))
 
     # Fall back to MangaDex
     logger.info("[MANGA-SCAN] Searching MangaDex for: %s" % series_name)
-    search_results = mangadex.search_manga(series_name, limit=5)
+    try:
+        search_results = mangadex.search_manga(series_name, limit=5)
+    except Exception as e:
+        logger.error("[MANGA-SCAN] MangaDex search failed for '%s': %s" % (series_name, e))
+        return result
 
     if not search_results or not search_results.get("results"):
         logger.info("[MANGA-SCAN] No match found for: %s" % series_name)
-        return {"matched": False}
+        return result
 
     best_match, best_score = _find_best_match(series_name, search_results["results"])
 
     if not best_match or best_score < 0.6:
-        logger.info(
-            "[MANGA-SCAN] No confident match for '%s' (best score: %.1f%%), skipping" % (series_name, best_score * 100)
-        )
-        return {"matched": False}
-
-    if best_score < 1.0:
-        logger.info(
-            "[MANGA-SCAN] Fuzzy match for '%s' -> '%s' (%.1f%%)"
-            % (series_name, best_match.get("name", ""), best_score * 100)
-        )
+        logger.info("[MANGA-SCAN] No confident match for '%s' (best score: %.1f%%)" % (series_name, best_score * 100))
+        return result
 
     manga_id = best_match.get("comicid", "")
     if not manga_id:
-        return {"matched": False}
+        return result
 
-    logger.info("[MANGA-SCAN] Matched '%s' to MangaDex: %s (%s)" % (series_name, best_match.get("name", ""), manga_id))
+    confidence = int(best_score * 100)
+    if best_score < 1.0:
+        logger.info(
+            "[MANGA-SCAN] Fuzzy match for '%s' -> '%s' (%d%%)" % (series_name, best_match.get("name", ""), confidence)
+        )
+    else:
+        logger.info(
+            "[MANGA-SCAN] Matched '%s' to MangaDex: %s (%s)" % (series_name, best_match.get("name", ""), manga_id)
+        )
 
-    importer.addMangaToDB(manga_id)
-    chapters_downloaded = _mark_chapters_downloaded(manga_id, files)
-
-    return {"matched": True, "chapters_downloaded": chapters_downloaded, "mangadex_name": best_match.get("name", "")}
-
-
-def _normalize_title(name):
-    """Normalize a title for comparison: lowercase, strip punctuation and common particles."""
-    name = name.lower().strip()
-    # Remove common subtitle separators and everything after
-    # e.g. "Hajime no Ippo: The Fighting!" -> "hajime no ippo"
-    name = re.split(r"\s*[:\-–—~]\s*", name)[0]
-    # Remove punctuation
-    name = re.sub(r"[^\w\s]", "", name)
-    # Collapse whitespace
-    name = re.sub(r"\s+", " ", name).strip()
-    return name
-
-
-def _name_similarity(name1, name2):
-    """Similarity score between two names (0.0 to 1.0).
-
-    Uses SequenceMatcher on normalized strings for character-level similarity,
-    combined with Jaccard word overlap to handle word reordering.
-    """
-    from difflib import SequenceMatcher
-
-    n1 = _normalize_title(name1)
-    n2 = _normalize_title(name2)
-
-    if not n1 or not n2:
-        return 0.0
-
-    # Exact match after normalization
-    if n1 == n2:
-        return 1.0
-
-    # Character-level sequence similarity
-    seq_score = SequenceMatcher(None, n1, n2).ratio()
-
-    # Word-level Jaccard similarity (handles reordering)
-    s1 = set(n1.split())
-    s2 = set(n2.split())
-    jaccard = len(s1 & s2) / len(s1 | s2) if (s1 | s2) else 0.0
-
-    # Containment check: if one name fully contains the other
-    containment = 0.0
-    if n1 in n2 or n2 in n1:
-        containment = min(len(n1), len(n2)) / max(len(n1), len(n2))
-
-    return max(seq_score, jaccard, containment)
+    result["matched"] = True
+    result["match"] = {
+        "comicid": manga_id,
+        "name": best_match.get("name", ""),
+        "year": best_match.get("comicyear", ""),
+        "image": best_match.get("comicthumb") or best_match.get("comicimage"),
+        "confidence": confidence,
+        "source": "mangadex",
+    }
+    return result
 
 
 def _mark_chapters_downloaded(comic_id, files):
@@ -440,9 +426,71 @@ def _mark_chapters_downloaded(comic_id, files):
     return count
 
 
+def import_selected_manga(selected_ids, scan_id):
+    """Import user-selected manga series from scan results.
+
+    Args:
+        selected_ids: List of provider IDs (md-xxx or mal-xxx) to import
+        scan_id: Timestamp of the scan these results came from
+
+    Returns dict with import results.
+    """
+    global MANGA_SCAN_RESULTS, MANGA_SCAN_ID
+
+    from comicarr import importer
+
+    if MANGA_SCAN_ID != scan_id:
+        return {
+            "success": False,
+            "error": "Scan results have changed, please review again",
+            "stale": True,
+        }
+
+    if not selected_ids:
+        return {"success": False, "error": "No series selected"}
+
+    if not MANGA_SCAN_RESULTS:
+        return {"success": False, "error": "No scan results available"}
+
+    # Whitelist: only allow IDs that appeared in the scan results
+    allowed_ids = {r["match"]["comicid"] for r in MANGA_SCAN_RESULTS if r.get("matched") and r.get("match")}
+
+    imported = 0
+    errors = []
+
+    for manga_id in selected_ids:
+        if manga_id not in allowed_ids:
+            logger.warning("[MANGA-SCAN] Rejected ID not in scan results: %s" % manga_id)
+            errors.append({"comicid": manga_id, "error": "ID not found in scan results"})
+            continue
+        try:
+            logger.info("[MANGA-SCAN] Importing series: %s" % manga_id)
+            if str(manga_id).startswith("mal-"):
+                importer.addMangaToDB_MAL(manga_id)
+            else:
+                importer.addMangaToDB(manga_id)
+            imported += 1
+        except Exception as e:
+            logger.error("[MANGA-SCAN] Failed to import %s: %s" % (manga_id, e))
+            errors.append({"comicid": manga_id, "error": str(e)})
+
+    # Only clear results if all imports succeeded
+    if not errors:
+        MANGA_SCAN_RESULTS = None
+        MANGA_SCAN_ID = None
+
+    return {
+        "success": len(errors) == 0,
+        "imported": imported,
+        "errors": errors,
+    }
+
+
 def get_scan_progress():
     """Return current scan progress for UI polling."""
     return {
         "status": MANGA_SCAN_STATUS,
         "progress": MANGA_SCAN_PROGRESS.copy(),
+        "scan_id": MANGA_SCAN_ID,
+        "results": MANGA_SCAN_RESULTS,
     }
