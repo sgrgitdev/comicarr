@@ -18,7 +18,7 @@ import {
   parseAsStringLiteral,
   createParser,
 } from "nuqs";
-import { Trash2, Pause, Play, X } from "lucide-react";
+import { Trash2, Pause, Play, X, LayoutList, LayoutGrid } from "lucide-react";
 import { Input } from "@/components/ui/input";
 import { Button } from "@/components/ui/button";
 import { Checkbox } from "@/components/ui/checkbox";
@@ -35,7 +35,9 @@ import SeriesFilters, {
   type ProgressFilter,
   type StatusFilter,
 } from "./SeriesFilters";
+import SeriesGrid from "./SeriesGrid";
 import { SORT_DELIMITER } from "@/lib/delimiters";
+import { getProgressPercentage, getProgressCategory } from "@/lib/series-utils";
 import {
   useBulkDeleteSeries,
   useBulkPauseSeries,
@@ -63,24 +65,12 @@ const seriesParams = {
   type: parseAsStringLiteral(["comic", "manga"] as const),
   progress: parseAsStringLiteral(["0", "partial", "100"] as const),
   status: parseAsStringLiteral(["Active", "Paused", "Ended"] as const),
+  view: parseAsStringLiteral(["list", "grid"] as const).withDefault("list"),
 };
 
 interface SeriesTableProps {
   data?: Comic[];
   isLoading?: boolean;
-}
-
-function getProgressPercentage(comic: Comic): number {
-  const total = parseInt(String(comic.Total)) || 0;
-  const have = parseInt(String(comic.Have)) || 0;
-  return total > 0 ? Math.round((have / total) * 100) : 0;
-}
-
-function getProgressCategory(comic: Comic): "0" | "partial" | "100" {
-  const percentage = getProgressPercentage(comic);
-  if (percentage === 0) return "0";
-  if (percentage === 100) return "100";
-  return "partial";
 }
 
 export default function SeriesTable({
@@ -118,10 +108,8 @@ export default function SeriesTable({
   const statusFilter: StatusFilter = params.status ?? "all";
 
   const sorting: SortingState = params.sort ? [params.sort] : [];
-  const pagination = useMemo(
-    () => ({ pageIndex: params.page, pageSize: 20 }),
-    [params.page],
-  );
+  const isGridView = params.view === "grid";
+  const pageSize = isGridView ? 24 : 20;
 
   const filterCounts = useMemo(() => {
     const counts = {
@@ -171,6 +159,19 @@ export default function SeriesTable({
       return true;
     });
   }, [data, typeFilter, progressFilter, statusFilter]);
+
+  // Pre-clamp page to valid range during render so the table always gets a
+  // valid pageIndex, even before the URL-sync effect fires.
+  const maxPageEstimate = Math.max(
+    0,
+    Math.ceil(filteredData.length / pageSize) - 1,
+  );
+  const effectivePage = Math.min(Math.max(params.page, 0), maxPageEstimate);
+
+  const pagination = useMemo(
+    () => ({ pageIndex: effectivePage, pageSize }),
+    [effectivePage, pageSize],
+  );
 
   const selectedSeriesIds = useMemo(() => {
     return Object.keys(rowSelection).filter((id) => rowSelection[id]);
@@ -327,7 +328,10 @@ export default function SeriesTable({
         typeof updaterOrValue === "function"
           ? updaterOrValue(pagination)
           : updaterOrValue;
-      setParams({ page: newPagination.pageIndex });
+      const newPage = newPagination.pageIndex;
+      if (newPage !== effectivePage) {
+        setParams({ page: newPage === 0 ? null : newPage });
+      }
     },
     onRowSelectionChange: (updater) => {
       setConfirmDelete(false);
@@ -343,7 +347,9 @@ export default function SeriesTable({
 
   const pageCount = table.getPageCount();
 
-  // Clamp page to valid range (handles negative values and out-of-bounds)
+  // Sync URL when page is out of bounds (e.g. search filter reduced results).
+  // The table already renders the clamped effectivePage, so this only fixes
+  // the URL — it is not on the critical render path.
   useEffect(() => {
     const maxPage = Math.max(0, pageCount - 1);
     const clampedPage = Math.min(Math.max(params.page, 0), maxPage);
@@ -351,15 +357,29 @@ export default function SeriesTable({
     if (clampedPage !== params.page) {
       setParams({ page: clampedPage === 0 ? null : clampedPage });
     }
-  }, [pageCount, params.page, setParams]);
+    // setParams is a stable setter from useQueryStates — safe to omit
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [pageCount, params.page]);
 
   if (isLoading) {
     return (
       <div className="space-y-4">
         <Skeleton className="h-10 w-full max-w-sm" />
-        {[...Array(10)].map((_, i) => (
-          <Skeleton key={i} className="h-16 w-full" />
-        ))}
+        {isGridView ? (
+          <div className="grid grid-cols-2 sm:grid-cols-3 md:grid-cols-4 lg:grid-cols-5 xl:grid-cols-6 gap-4">
+            {[...Array(12)].map((_, i) => (
+              <div key={i} className="space-y-2">
+                <Skeleton className="aspect-[2/3] w-full rounded-lg" />
+                <Skeleton className="h-4 w-3/4" />
+                <Skeleton className="h-3 w-1/2" />
+              </div>
+            ))}
+          </div>
+        ) : (
+          [...Array(10)].map((_, i) => (
+            <Skeleton key={i} className="h-16 w-full" />
+          ))
+        )}
       </div>
     );
   }
@@ -396,6 +416,40 @@ export default function SeriesTable({
           counts={filterCounts}
         />
         <div className="flex items-center gap-2">
+          <div className="inline-flex rounded-lg border border-border p-0.5 bg-muted/50">
+            <Button
+              variant="ghost"
+              size="sm"
+              onClick={() => {
+                setParams({ view: null });
+                setRowSelection({});
+              }}
+              className={`h-8 w-8 p-0 rounded-md transition-colors ${
+                !isGridView
+                  ? "bg-background text-foreground shadow-sm"
+                  : "text-muted-foreground hover:text-foreground"
+              }`}
+              aria-label="List view"
+            >
+              <LayoutList className="w-4 h-4" />
+            </Button>
+            <Button
+              variant="ghost"
+              size="sm"
+              onClick={() => {
+                setParams({ view: "grid", page: null });
+                setRowSelection({});
+              }}
+              className={`h-8 w-8 p-0 rounded-md transition-colors ${
+                isGridView
+                  ? "bg-background text-foreground shadow-sm"
+                  : "text-muted-foreground hover:text-foreground"
+              }`}
+              aria-label="Grid view"
+            >
+              <LayoutGrid className="w-4 h-4" />
+            </Button>
+          </div>
           <Input
             placeholder="Search series..."
             value={searchInput}
@@ -413,7 +467,7 @@ export default function SeriesTable({
       </div>
 
       {/* Bulk Action Bar */}
-      {selectedSeriesIds.length > 0 && (
+      {!isGridView && selectedSeriesIds.length > 0 && (
         <div className="flex items-center gap-4 px-4 py-3 bg-primary/10 border border-primary/20 rounded-lg">
           <span className="text-sm font-medium">
             {selectedSeriesIds.length} series selected
@@ -461,10 +515,17 @@ export default function SeriesTable({
         </div>
       )}
 
-      <DataTable
-        table={table}
-        onRowClick={(row) => navigate(`/library/${row.ComicID}`)}
-      />
+      {isGridView ? (
+        <SeriesGrid
+          rows={table.getRowModel().rows}
+          onCardClick={(comic) => navigate(`/library/${comic.ComicID}`)}
+        />
+      ) : (
+        <DataTable
+          table={table}
+          onRowClick={(row) => navigate(`/library/${row.ComicID}`)}
+        />
+      )}
 
       <div className="flex items-center justify-between">
         <div className="text-sm text-muted-foreground">
