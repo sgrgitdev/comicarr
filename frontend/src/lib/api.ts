@@ -4,6 +4,7 @@
  */
 
 import type { LoginResponse, LogoutResponse, SessionResponse } from "@/types";
+import { isMockEnabled, mockApiResponse } from "@/lib/mockData";
 
 const AUTH_BASE = "/api/auth";
 
@@ -101,6 +102,10 @@ export async function login(
   username: string,
   password: string,
 ): Promise<LoginResponse> {
+  if (isMockEnabled()) {
+    const mocked = mockApiResponse("POST", `${AUTH_BASE}/login`);
+    if (mocked !== undefined) return mocked as LoginResponse;
+  }
   try {
     const url = new URL(`${AUTH_BASE}/login`, window.location.origin);
 
@@ -133,6 +138,10 @@ export async function login(
  * Logout the current user
  */
 export async function logout(): Promise<LogoutResponse> {
+  if (isMockEnabled()) {
+    const mocked = mockApiResponse("POST", `${AUTH_BASE}/logout`);
+    if (mocked !== undefined) return mocked as LogoutResponse;
+  }
   try {
     const url = new URL(`${AUTH_BASE}/logout`, window.location.origin);
 
@@ -161,6 +170,10 @@ export async function logout(): Promise<LogoutResponse> {
  * Check if user has a valid session
  */
 export async function checkSession(): Promise<SessionResponse> {
+  if (isMockEnabled()) {
+    const mocked = mockApiResponse("GET", `${AUTH_BASE}/check-session`);
+    if (mocked !== undefined) return mocked as SessionResponse;
+  }
   try {
     const url = new URL(`${AUTH_BASE}/check-session`, window.location.origin);
 
@@ -184,6 +197,10 @@ export async function checkSession(): Promise<SessionResponse> {
  * Check if initial setup is needed (no credentials configured)
  */
 export async function checkSetup(): Promise<{ needs_setup: boolean }> {
+  if (isMockEnabled()) {
+    const mocked = mockApiResponse("GET", `${AUTH_BASE}/check-setup`);
+    if (mocked !== undefined) return mocked as { needs_setup: boolean };
+  }
   try {
     const url = new URL(`${AUTH_BASE}/check-setup`, window.location.origin);
     const response = await fetch(url, {
@@ -247,6 +264,15 @@ export async function apiRequest<T = unknown>(
   path: string,
   body?: Record<string, unknown> | null,
 ): Promise<T> {
+  if (isMockEnabled()) {
+    const mocked = mockApiResponse(method, path);
+    if (mocked !== undefined) {
+      return mocked as T;
+    }
+    // Fall through for unmocked endpoints — in mock mode the backend may
+    // not be running, so most writes will 502. That's fine for browsing.
+  }
+
   const url = new URL(path, window.location.origin);
 
   const options: RequestInit = {
