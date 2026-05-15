@@ -249,13 +249,15 @@ class NZBGet(object):
                 )
                 return {"status": "double-pp", "failed": False}
 
-            if all(
-                [
-                    "SUCCESS" in hq[0]["Status"],
-                    (hq[0]["FileSizeMB"] * 0.95) <= hq[0]["DownloadedSizeMB"] <= (hq[0]["FileSizeMB"] * 1.05),
-                ]
-            ):
+            if "SUCCESS" in hq[0]["Status"]:
                 logger.fdebug("%s has final file size of %sMB" % (hq[0]["Name"], hq[0]["DownloadedSizeMB"]))
+                if hq[0]["FileSizeMB"] and not (
+                    (hq[0]["FileSizeMB"] * 0.90) <= hq[0]["DownloadedSizeMB"] <= (hq[0]["FileSizeMB"] * 1.20)
+                ):
+                    logger.warn(
+                        "NZBGet reported a successful download for %s but the rounded MB sizes differ (%sMB expected, %sMB downloaded). Continuing completed download handling."
+                        % (hq[0]["Name"], hq[0]["FileSizeMB"], hq[0]["DownloadedSizeMB"])
+                    )
                 if os.path.isdir(hq[0]["DestDir"]):
                     destdir = hq[0]["DestDir"]
                     logger.fdebug("location found @ %s" % destdir)

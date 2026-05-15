@@ -60,6 +60,42 @@ def _insert_wanted_manga(engine):
         )
 
 
+def _insert_wanted_manga_volume(engine):
+    with engine.begin() as conn:
+        conn.execute(
+            insert(comics).values(
+                ComicID="manga-volume-1",
+                ComicName="Demon Slayer",
+                ComicYear="2016",
+                Type="manga",
+                ContentType="manga",
+            )
+        )
+        conn.execute(
+            insert(issues),
+            [
+                {
+                    "IssueID": "chapter-1",
+                    "ComicID": "manga-volume-1",
+                    "ComicName": "Demon Slayer",
+                    "Issue_Number": "1",
+                    "Status": "Wanted",
+                    "ChapterNumber": "1",
+                    "VolumeNumber": "1",
+                },
+                {
+                    "IssueID": "chapter-2",
+                    "ComicID": "manga-volume-1",
+                    "ComicName": "Demon Slayer",
+                    "Issue_Number": "2",
+                    "Status": "Wanted",
+                    "ChapterNumber": "2",
+                    "VolumeNumber": "1",
+                },
+            ],
+        )
+
+
 def test_force_search_job_is_durable_and_enqueued(durable_search_db):
     _insert_wanted_manga(durable_search_db)
 
@@ -83,6 +119,42 @@ def test_force_search_job_is_durable_and_enqueued(durable_search_db):
     assert job["total_items"] == 1
     assert item["status"] == "queued"
     assert item["issueid"] == "chapter-1"
+
+
+def test_priority_search_job_goes_to_front_of_queue(durable_search_db):
+    first = {
+        "issueid": "bulk-1",
+        "comicid": "comic-1",
+        "comicname": "Bulk Comic",
+        "issuenumber": "1",
+    }
+    priority = {
+        "issueid": "priority-1",
+        "comicid": "comic-2",
+        "comicname": "New Comic",
+        "issuenumber": "1",
+    }
+
+    jobs.start_search_job([first], kind="bulk", source="test", title="Bulk")
+    jobs.start_search_job([priority], kind="series", source="test", title="Priority", priority=True)
+
+    assert comicarr.SEARCH_QUEUE.get_nowait()["issueid"] == "priority-1"
+    assert comicarr.SEARCH_QUEUE.get_nowait()["issueid"] == "bulk-1"
+
+
+def test_manga_volume_chapters_are_grouped_into_one_volume_search(durable_search_db):
+    _insert_wanted_manga_volume(durable_search_db)
+
+    result = jobs.start_comic_search_job("manga-volume-1")
+
+    assert result["success"] is True
+    assert result["total_items"] == 1
+    queued = comicarr.SEARCH_QUEUE.get_nowait()
+    assert queued["issueid"] == "chapter-2"
+    assert queued["issuenumber"] == "1"
+    assert queued["chapter_number"] is None
+    assert queued["volume_number"] == "1"
+    assert queued["manga_pack"] == "volume"
 
 
 def test_job_item_running_and_finished_updates_job(durable_search_db):
@@ -120,3 +192,51 @@ def test_restore_pending_search_jobs_requeues_running_items(durable_search_db):
         job_item = conn.execute(select(search_job_items)).mappings().one()
     assert job_item["status"] == "queued"
     assert job_item["reason"] == "Requeued after restart"
+
+
+def test_start_comic_search_job_can_mark_series_wanted(durable_search_db):
+    with durable_search_db.begin() as conn:
+        conn.execute(
+            insert(comics).values(
+                ComicID="comic-1",
+                ComicName="Spawn",
+                ComicYear="1992",
+                Type="Print",
+                ContentType="comic",
+            )
+        )
+        conn.execute(
+            insert(issues),
+            [
+                {
+                    "IssueID": "issue-1",
+                    "ComicID": "comic-1",
+                    "ComicName": "Spawn",
+                    "Issue_Number": "1",
+                    "Status": "Skipped",
+                },
+                {
+                    "IssueID": "issue-2",
+                    "ComicID": "comic-1",
+                    "ComicName": "Spawn",
+                    "Issue_Number": "2",
+                    "Status": "Downloaded",
+                },
+            ],
+        )
+
+    result = jobs.start_comic_search_job("comic-1", mark_wanted=True)
+
+    assert result["success"] is True
+    assert result["total_items"] == 1
+    assert result["marked_wanted"]["issues"] == 1
+    queued = comicarr.SEARCH_QUEUE.get_nowait()
+    assert queued["issueid"] == "issue-1"
+
+    with durable_search_db.connect() as conn:
+        statuses = {
+            row["IssueID"]: row["Status"]
+            for row in conn.execute(select(issues.c.IssueID, issues.c.Status)).mappings().all()
+        }
+
+    assert statuses == {"issue-1": "Wanted", "issue-2": "Downloaded"}

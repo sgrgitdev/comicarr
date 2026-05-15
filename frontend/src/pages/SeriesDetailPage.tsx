@@ -130,17 +130,18 @@ export default function SeriesDetailPage() {
       const result = await apiRequest<{ queued?: number; selected?: number }>(
         "POST",
         `/api/series/${comicId}/queue-missing`,
-        { search: false },
+        { search: true },
       );
       const count = result.queued ?? result.selected ?? 0;
       addToast({
         type: "success",
-        title: "Missing issues marked",
-        description: `${count} ${isManga ? "chapters" : "issues"} marked as wanted.`,
+        title: "Search queued",
+        description: `${count} ${isManga ? "chapters" : "issues"} marked as wanted and queued for search.`,
       });
       await queryClient.invalidateQueries({ queryKey: ["series", comicId] });
       await queryClient.invalidateQueries({ queryKey: ["series"] });
       await queryClient.invalidateQueries({ queryKey: ["wanted"] });
+      await queryClient.invalidateQueries({ queryKey: ["searchQueue"] });
     } catch (err) {
       addToast({
         type: "error",

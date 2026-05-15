@@ -115,9 +115,12 @@ def addvialist(seriesQueue, issueWantQueue):
                 }
 
             if "suppress_addall" in item.keys():
-                addComictoDB(item["comicid"], suppress_addall=item["suppress_addall"])
+                result = addComictoDB(item["comicid"], suppress_addall=item["suppress_addall"])
             else:
-                addComictoDB(item["comicid"])
+                result = addComictoDB(item["comicid"])
+
+            if item.get("auto_search"):
+                _start_auto_search_for_added_item(item, result)
         elif issueWantQueue.qsize() > 0:
             time.sleep(1)
             issueItem = issueWantQueue.get(True)
@@ -125,6 +128,31 @@ def addvialist(seriesQueue, issueWantQueue):
         else:
             comicarr.ADD_LIST.put("exit")
     return False
+
+
+def _start_auto_search_for_added_item(item, result=None):
+    """Mark/search items after an API add request completes in the add thread."""
+    comicid = item.get("comicid")
+    if not comicid:
+        return
+
+    monitor = str(item.get("monitor") or "").lower()
+    mark_wanted = monitor == "all"
+
+    try:
+        from comicarr.app.search import jobs
+
+        search_result = jobs.start_comic_search_job(
+            str(comicid),
+            title="Search wanted for %s" % item.get("comicname") if item.get("comicname") else "Search wanted for %s" % comicid,
+            mark_wanted=mark_wanted,
+        )
+        logger.info(
+            "[AUTO-SEARCH] Queued %s wanted item(s) for ComicID %s after add"
+            % (search_result.get("total_items", 0), comicid)
+        )
+    except Exception as e:
+        logger.warn("[AUTO-SEARCH] Unable to queue search after add for %s: %s" % (comicid, e))
 
 
 def markIssueWantedById(issueId):

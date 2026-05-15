@@ -83,10 +83,6 @@ class Process(object):
                 while True:
                     if chk[0]["mode"] == "fail":
                         logger.info("Initiating Failed Download handling")
-                        if chk[0]["annchk"] == "no":
-                            mode = "want"
-                        else:
-                            mode = "want_ann"
                         self.failed = True
                         break
                     elif chk[0]["mode"] == "stop":
@@ -113,18 +109,22 @@ class Process(object):
                 failchk = ppqueue.get()
                 if failchk[0]["mode"] == "retry":
                     logger.info("Attempting to return to search module with " + str(failchk[0]["issueid"]))
-                    if failchk[0]["annchk"] == "no":
-                        mode = "want"
-                    else:
-                        mode = "want_ann"
-                    qq = comicarr.webserve.WebInterface()
-                    qq.queueit(
-                        mode=mode,
-                        ComicName=failchk[0]["comicname"],
-                        ComicIssue=failchk[0]["issuenumber"],
-                        ComicID=failchk[0]["comicid"],
-                        IssueID=failchk[0]["issueid"],
-                        manualsearch=True,
+                    from comicarr.app.search import jobs
+
+                    jobs.start_search_job(
+                        [
+                            {
+                                "issueid": failchk[0]["issueid"],
+                                "comicid": failchk[0]["comicid"],
+                                "comicname": failchk[0]["comicname"],
+                                "issuenumber": failchk[0]["issuenumber"],
+                                "manual": True,
+                            }
+                        ],
+                        kind="failed-retry",
+                        source="failed-download",
+                        title="%s #%s" % (failchk[0]["comicname"], failchk[0]["issuenumber"]),
+                        priority=True,
                     )
                 elif failchk[0]["mode"] == "stop":
                     pass
@@ -142,10 +142,6 @@ class Process(object):
             while True:
                 if chk[0]["mode"] == "fail":
                     logger.info("Initiating Failed Download handling")
-                    if chk[0]["annchk"] == "no":
-                        mode = "want"
-                    else:
-                        mode = "want_ann"
                     self.failed = True
                     break
                 elif chk[0]["mode"] == "stop":

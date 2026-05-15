@@ -688,6 +688,26 @@ def get_manga_aggregate(manga_id, languages=None):
     return data
 
 
+def _chapter_volume_map_from_aggregate(manga_id):
+    """Return chapter -> volume mapping from the unfiltered aggregate endpoint."""
+    if manga_id.startswith("md-"):
+        manga_id = manga_id[3:]
+
+    data = _make_request("/manga/%s/aggregate" % manga_id, params={})
+    if not data or data.get("result") != "ok":
+        logger.error("[MANGADEX] Failed to fetch unfiltered aggregate for manga %s" % manga_id)
+        return {}
+
+    chapter_map = {}
+    for volume_key, volume_data in data.get("volumes", {}).items():
+        volume_num = volume_data.get("volume") or volume_key
+        for _chapter_key, chapter_data in volume_data.get("chapters", {}).items():
+            chapter_num = chapter_data.get("chapter")
+            if chapter_num is not None:
+                chapter_map[str(chapter_num)] = str(volume_num) if volume_num is not None else None
+    return chapter_map
+
+
 def get_total_chapter_count(manga_id):
     """
     Get the total number of chapters for a manga, regardless of language.
@@ -708,20 +728,8 @@ def get_total_chapter_count(manga_id):
 
     logger.info("[MANGADEX] Fetching language-unfiltered aggregate for manga: %s" % manga_id)
 
-    # Intentionally NO translatedLanguage[] param — we want ALL chapters
-    data = _make_request("/manga/%s/aggregate" % manga_id, params={})
-
-    if not data or data.get("result") != "ok":
-        logger.error("[MANGADEX] Failed to fetch unfiltered aggregate for manga %s" % manga_id)
-        return 0
-
-    # Count unique chapter numbers across all volumes
-    chapter_numbers = set()
-    for volume_key, volume_data in data.get("volumes", {}).items():
-        for ch_key, ch_data in volume_data.get("chapters", {}).items():
-            chapter_num = ch_data.get("chapter")
-            if chapter_num is not None:
-                chapter_numbers.add(str(chapter_num))
+    # Count unique chapter numbers across all volumes.
+    chapter_numbers = set(_chapter_volume_map_from_aggregate(manga_id).keys())
 
     total = len(chapter_numbers)
     logger.info("[MANGADEX] Unfiltered aggregate: %d total chapters for manga %s" % (total, manga_id))
@@ -755,6 +763,8 @@ def get_all_chapters(manga_id, languages=None, include_unavailable=True):
             logger.fdebug("[MANGADEX] Cache hit for chapters of manga %s" % manga_id)
             return cache_entry["data"]
 
+    aggregate_volume_map = _chapter_volume_map_from_aggregate(manga_id) if include_unavailable else {}
+
     # First, get available chapters with full metadata (filtered by language)
     available_chapters = []
     offset = 0
@@ -778,12 +788,38 @@ def get_all_chapters(manga_id, languages=None, include_unavailable=True):
     for ch in available_chapters:
         ch_num = ch.get("chapter")
         if ch_num is not None:
+            if not ch.get("volume") and str(ch_num) in aggregate_volume_map:
+                ch["volume"] = aggregate_volume_map[str(ch_num)]
             available_map[str(ch_num)] = ch
 
     all_chapters = list(available_chapters)
 
-    # If requested, add unavailable chapters based on manga's lastChapter metadata
-    if include_unavailable:
+    # If requested, add unavailable chapters from MangaDex aggregate first. The
+    # aggregate endpoint has the volume/chapter structure and avoids inventing
+    # placeholder chapters past the real volume map for licensed manga.
+    if include_unavailable and aggregate_volume_map:
+        for ch_num, volume_num in aggregate_volume_map.items():
+            if ch_num in available_map:
+                continue
+            all_chapters.append(
+                {
+                    "id": f"unavailable-{manga_id}-{ch_num}",
+                    "chapter": ch_num,
+                    "volume": volume_num,
+                    "title": None,
+                    "language": "en",
+                    "pages": 0,
+                    "publish_at": None,
+                    "created_at": None,
+                    "updated_at": None,
+                    "scanlation_group": None,
+                    "external_url": None,
+                    "unavailable": True,
+                }
+            )
+
+    # Fallback: if aggregate is unavailable, use lastChapter metadata.
+    if include_unavailable and not aggregate_volume_map:
         # Get manga details to find total chapter count
         manga_details = get_manga_details(manga_id)
         last_chapter_str = manga_details.get("last_chapter")

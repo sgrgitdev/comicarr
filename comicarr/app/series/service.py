@@ -254,38 +254,13 @@ def queue_missing_for_series(ctx, comic_id, limit=None, trigger_search=False):
 
 def search_wanted_for_series(ctx, comic_id, limit=None):
     """Start a durable search job for wanted issues in one series."""
-    from sqlalchemy import select
+    from comicarr.app.search import jobs
 
-    from comicarr.app.search import service as search_service
-
-    stmt = (
-        select(issues.c.IssueID)
-        .where(issues.c.ComicID == str(comic_id), issues.c.Status == "Wanted")
-        .order_by(issues.c.Int_IssueNumber.asc())
-    )
-
-    if limit is not None:
-        stmt = stmt.limit(int(limit))
-
-    issue_ids = [row["IssueID"] for row in db.select_all(stmt)]
-    if not issue_ids:
-        return {
-            "success": True,
-            "comic_id": str(comic_id),
-            "selected": 0,
-            "search": {
-                "success": True,
-                "status": "empty",
-                "total_items": 0,
-                "message": "No wanted issues to search",
-            },
-        }
-
-    search_result = search_service.search_issue_ids(ctx, issue_ids)
+    search_result = jobs.start_comic_search_job(str(comic_id), limit=limit)
     return {
         "success": True,
         "comic_id": str(comic_id),
-        "selected": len(issue_ids),
+        "selected": search_result.get("total_items", 0),
         "search": search_result,
     }
 

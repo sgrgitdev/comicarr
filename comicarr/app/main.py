@@ -143,6 +143,19 @@ async def lifespan(app: FastAPI):
 
         comicarr.logger.warn("[SEARCH-JOB] Unable to restore durable search queue: %s", e)
 
+    try:
+        from comicarr.app.downloads import service as downloads_service
+
+        restored_downloads = downloads_service.restore_pending_completed_downloads()
+        if restored_downloads.get("restored"):
+            import comicarr
+
+            comicarr.logger.info("[DOWNLOADS] Restored pending completed downloads: %s", restored_downloads)
+    except Exception as e:
+        import comicarr
+
+        comicarr.logger.warn("[DOWNLOADS] Unable to restore pending completed downloads: %s", e)
+
     # Initialize AI client if configured
     from comicarr import logger
     from comicarr.app.ai.circuit_breaker import CircuitBreaker

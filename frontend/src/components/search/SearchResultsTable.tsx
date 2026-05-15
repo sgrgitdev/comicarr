@@ -174,7 +174,7 @@ function AddButton({
       addToast({
         type: "success",
         title: `Adding ${itemLabel}...`,
-        description: `${comic.name} is being added to your library. Please wait...`,
+        description: `${comic.name} is being added, monitored, and queued for search.`,
         duration: 5000,
       });
     } catch (err) {

@@ -30,6 +30,7 @@ from comicarr.tables import annuals, comics, issues, search_job_items, search_jo
 
 ACTIVE_ITEM_STATUSES = {"queued", "running"}
 TERMINAL_JOB_STATUSES = {"completed", "completed_with_errors", "cancelled", "empty", "error"}
+PROTECTED_ISSUE_STATUSES = {"Downloaded", "Snatched", "Archived"}
 
 
 def _now() -> str:
@@ -59,14 +60,22 @@ def _item_payload(item: dict[str, Any]) -> dict[str, Any]:
         "content_type": item.get("content_type"),
         "chapter_number": item.get("chapter_number"),
         "volume_number": item.get("volume_number"),
+        "manga_pack": item.get("manga_pack"),
         "manual": item.get("manual", False),
         "search_job_id": item.get("search_job_id"),
         "search_job_item_id": item.get("search_job_item_id"),
     }
 
 
-def _enqueue_payload(payload: dict[str, Any]) -> None:
-    comicarr.SEARCH_QUEUE.put(payload)
+def _enqueue_payload(payload: dict[str, Any], priority: bool = False) -> None:
+    queue_obj = comicarr.SEARCH_QUEUE
+    if priority and hasattr(queue_obj, "not_full") and hasattr(queue_obj, "queue"):
+        with queue_obj.not_full:
+            queue_obj.queue.appendleft(payload)
+            queue_obj.unfinished_tasks += 1
+            queue_obj.not_empty.notify()
+        return
+    queue_obj.put(payload)
 
 
 def _job_counts(conn, job_id: int) -> Counter:
@@ -164,7 +173,12 @@ def _create_job_items(job_id: int, items: list[dict[str, Any]]) -> list[dict[str
     return created
 
 
-def _issue_rows(issue_ids: list[str] | None = None, wanted_only: bool = False) -> list[dict[str, Any]]:
+def _issue_rows(
+    issue_ids: list[str] | None = None,
+    wanted_only: bool = False,
+    comic_id: str | None = None,
+    limit: int | None = None,
+) -> list[dict[str, Any]]:
     status_values = ["Wanted"]
     if getattr(comicarr.CONFIG, "FAILED_DOWNLOAD_HANDLING", False) and getattr(comicarr.CONFIG, "FAILED_AUTO", False):
         status_values.append("Failed")
@@ -194,13 +208,21 @@ def _issue_rows(issue_ids: list[str] | None = None, wanted_only: bool = False) -
 
     if issue_ids is not None:
         stmt = stmt.where(issues.c.IssueID.in_([str(i) for i in issue_ids]))
+    if comic_id is not None:
+        stmt = stmt.where(issues.c.ComicID == str(comic_id))
     if wanted_only:
         stmt = stmt.where(issues.c.Status.in_(status_values))
+    if limit is not None:
+        stmt = stmt.limit(int(limit))
 
     return db.select_all(stmt)
 
 
-def _annual_rows(wanted_only: bool = False) -> list[dict[str, Any]]:
+def _annual_rows(
+    wanted_only: bool = False,
+    comic_id: str | None = None,
+    limit: int | None = None,
+) -> list[dict[str, Any]]:
     if not getattr(comicarr.CONFIG, "ANNUALS_ON", False):
         return []
     stmt = (
@@ -224,8 +246,12 @@ def _annual_rows(wanted_only: bool = False) -> list[dict[str, Any]]:
         .where(annuals.c.Deleted != 1)
         .order_by(desc(annuals.c.DateAdded), desc(annuals.c.IssueDate), desc(annuals.c.Issue_Number))
     )
+    if comic_id is not None:
+        stmt = stmt.where(annuals.c.ComicID == str(comic_id))
     if wanted_only:
         stmt = stmt.where(annuals.c.Status == "Wanted")
+    if limit is not None:
+        stmt = stmt.limit(int(limit))
     return db.select_all(stmt)
 
 
@@ -254,25 +280,41 @@ def _story_arc_rows(wanted_only: bool = False) -> list[dict[str, Any]]:
 def _rows_to_items(rows: list[dict[str, Any]]) -> list[dict[str, Any]]:
     items: list[dict[str, Any]] = []
     seen: set[str] = set()
+    seen_manga_volumes: set[tuple[str, str]] = set()
     for row in rows:
         issueid = str(row.get("IssueID") or "")
         if not issueid or issueid in seen:
             continue
-        seen.add(issueid)
 
         booktype = row.get("Corrected_Type") or row.get("BookType")
         content_type = row.get("ContentType") or "comic"
+        volume_number = _row_get(row, "VolumeNumber")
+        chapter_number = _row_get(row, "ChapterNumber")
+        is_manga = str(content_type or "").lower() == "manga" or str(booktype or "").lower() == "manga"
+
+        manga_pack = None
+        if is_manga and volume_number not in (None, "", "None"):
+            volume_key = (str(row.get("ComicID") or ""), str(volume_number))
+            if volume_key in seen_manga_volumes:
+                seen.add(issueid)
+                continue
+            seen_manga_volumes.add(volume_key)
+            manga_pack = "volume"
+            chapter_number = None
+
+        seen.add(issueid)
         items.append(
             {
                 "comicname": row.get("ComicName"),
                 "seriesyear": row.get("ComicYear"),
-                "issuenumber": row.get("Issue_Number"),
+                "issuenumber": str(volume_number) if manga_pack == "volume" else row.get("Issue_Number"),
                 "issueid": issueid,
                 "comicid": row.get("ComicID"),
                 "booktype": _queue_booktype(content_type, booktype),
                 "content_type": content_type,
-                "chapter_number": _row_get(row, "ChapterNumber"),
-                "volume_number": _row_get(row, "VolumeNumber"),
+                "chapter_number": chapter_number,
+                "volume_number": volume_number,
+                "manga_pack": manga_pack,
             }
         )
     return items
@@ -298,11 +340,75 @@ def start_issue_search_job(issue_ids: list[str], title: str = "Search selected i
     return result
 
 
-def start_search_job(items: list[dict[str, Any]], kind: str, source: str, title: str) -> dict[str, Any]:
+def mark_comic_items_wanted(comic_id: str, include_annuals: bool = True) -> dict[str, int]:
+    """Mark searchable missing items in a series as Wanted."""
+    now = _now()
+    comic_id = str(comic_id)
+    wanted_issues = 0
+    wanted_annuals = 0
+
+    with db.get_engine().begin() as conn:
+        result = conn.execute(
+            update(issues)
+            .where(issues.c.ComicID == comic_id, issues.c.Status.notin_(PROTECTED_ISSUE_STATUSES))
+            .values(Status="Wanted", DateAdded=now)
+        )
+        wanted_issues = int(result.rowcount or 0)
+
+        if include_annuals and getattr(comicarr.CONFIG, "ANNUALS_ON", False):
+            result = conn.execute(
+                update(annuals)
+                .where(
+                    annuals.c.ComicID == comic_id,
+                    annuals.c.Deleted != 1,
+                    annuals.c.Status.notin_(PROTECTED_ISSUE_STATUSES),
+                )
+                .values(Status="Wanted", DateAdded=now)
+            )
+            wanted_annuals = int(result.rowcount or 0)
+
+    return {"issues": wanted_issues, "annuals": wanted_annuals}
+
+
+def start_comic_search_job(
+    comic_id: str,
+    title: str | None = None,
+    mark_wanted: bool = False,
+    include_annuals: bool = True,
+    limit: int | None = None,
+    priority: bool = True,
+) -> dict[str, Any]:
+    """Create and enqueue a durable search job for one series."""
+    marked = {"issues": 0, "annuals": 0}
+    if mark_wanted:
+        marked = mark_comic_items_wanted(comic_id, include_annuals=include_annuals)
+
+    rows = _issue_rows(wanted_only=True, comic_id=str(comic_id), limit=limit)
+    if include_annuals:
+        rows.extend(_annual_rows(wanted_only=True, comic_id=str(comic_id), limit=limit))
+
+    items = _rows_to_items(rows)
+    if title is None:
+        title = "Search wanted for %s" % comic_id
+
+    result = start_search_job(items, kind="series", source="wanted", title=title, priority=priority)
+    result["comic_id"] = str(comic_id)
+    result["marked_wanted"] = marked
+    return result
+
+
+def start_search_job(
+    items: list[dict[str, Any]],
+    kind: str,
+    source: str,
+    title: str,
+    priority: bool = False,
+) -> dict[str, Any]:
     job_id = _create_job(kind=kind, source=source, title=title, total_items=len(items))
     queued_items = _create_job_items(job_id, items)
-    for payload in queued_items:
-        _enqueue_payload(payload)
+    payloads = reversed(queued_items) if priority else queued_items
+    for payload in payloads:
+        _enqueue_payload(payload, priority=priority)
 
     logger.info("[SEARCH-JOB] Created %s job %s with %s item(s)", kind, job_id, len(queued_items))
     return {
@@ -462,7 +568,7 @@ def restore_pending_search_jobs(limit: int = 500) -> dict[str, Any]:
         rows = conn.execute(
             select(search_job_items)
             .where(search_job_items.c.status == "queued")
-            .order_by(search_job_items.c.job_id.asc(), search_job_items.c.position.asc())
+            .order_by(search_job_items.c.job_id.desc(), search_job_items.c.position.asc())
             .limit(limit)
         ).mappings().all()
 

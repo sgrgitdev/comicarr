@@ -22,12 +22,13 @@ import zipfile
 from pathlib import Path
 
 import rarfile
+from sqlalchemy import select
 
 import comicarr
 from comicarr import db, getcomics, logger, nzbget, process, sabnzbd
 from comicarr.app.downloads import queries as dl_queries
 from comicarr.downloaders import mediafire, mega, pixeldrain
-from comicarr.tables import annuals, comics, ddl_info, issues, storyarcs, weekly
+from comicarr.tables import annuals, comics, ddl_info, issues, nzblog, storyarcs, weekly
 
 # ---------------------------------------------------------------------------
 # Download history
@@ -63,6 +64,217 @@ def clear_history(status_type=None):
 # ---------------------------------------------------------------------------
 # Post-processing
 # ---------------------------------------------------------------------------
+
+
+def _usable_path_setting(value):
+    if value is None:
+        return None
+    value = str(value).strip()
+    if not value or value.lower() == "none":
+        return None
+    return value
+
+
+def _normal_download_name(nzb_name):
+    if nzb_name is None:
+        return None
+    name = str(nzb_name).strip()
+    if not name:
+        return None
+    return re.sub(r"\.nzb$", "", name, flags=re.IGNORECASE)
+
+
+def _candidate_completed_roots():
+    roots = []
+    for attr in ("NZBGET_DIRECTORY", "CHECK_FOLDER"):
+        value = _usable_path_setting(getattr(comicarr.CONFIG, attr, None))
+        if value and value not in roots:
+            roots.append(value)
+    return [Path(root) for root in roots]
+
+
+def _find_completed_download_path(nzb_name, roots=None):
+    """Return the completed folder/file for a snatched NZB name if visible locally."""
+    normal_name = _normal_download_name(nzb_name)
+    if normal_name is None:
+        return None
+
+    for root in roots or _candidate_completed_roots():
+        try:
+            if not root.exists():
+                continue
+        except OSError:
+            continue
+
+        direct = root / normal_name
+        if direct.exists():
+            return direct
+
+        try:
+            for child in root.iterdir():
+                if child.name == normal_name:
+                    return child
+        except OSError:
+            continue
+    return None
+
+
+def _nzbget_history_lookup(names):
+    if not getattr(comicarr, "USE_NZBGET", False):
+        return {}
+
+    wanted = {_normal_download_name(name) for name in names}
+    wanted.discard(None)
+    if not wanted:
+        return {}
+
+    try:
+        client = nzbget.NZBGet()
+        history = client.server.history(True)
+    except Exception as e:
+        logger.warn("[DOWNLOADS] Unable to read NZBGet history while restoring downloads: %s", e)
+        return {}
+
+    found = {}
+    for item in history:
+        for key in ("Name", "NZBName"):
+            normal_name = _normal_download_name(item.get(key))
+            if normal_name in wanted and normal_name not in found:
+                found[normal_name] = item
+    return found
+
+
+def _failed_history_item(row, history_lookup):
+    for name in (row.get("NZBName"), row.get("AltNZBName")):
+        normal_name = _normal_download_name(name)
+        if normal_name is None:
+            continue
+        item = history_lookup.get(normal_name)
+        if item and "FAILURE" in str(item.get("Status", "")).upper():
+            return item
+    return None
+
+
+def _pp_queue_contains(issueid):
+    try:
+        with comicarr.PP_QUEUE.mutex:
+            return any(str(item.get("issueid")) == str(issueid) for item in comicarr.PP_QUEUE.queue)
+    except Exception:
+        return False
+
+
+def restore_pending_completed_downloads(limit=200):
+    """Requeue visible completed NZB downloads that were left Snatched after a restart."""
+    if not getattr(comicarr.CONFIG, "POST_PROCESSING", False):
+        return {"restored": 0, "failed": 0, "missing": 0, "skipped": 0}
+
+    roots = _candidate_completed_roots()
+    if not roots:
+        return {"restored": 0, "failed": 0, "missing": 0, "skipped": 0}
+
+    issue_stmt = (
+        select(
+            issues.c.IssueID,
+            issues.c.ComicID,
+            nzblog.c.NZBName,
+            nzblog.c.AltNZBName,
+            nzblog.c.PROVIDER,
+            nzblog.c.ID,
+        )
+        .select_from(issues.join(nzblog, issues.c.IssueID == nzblog.c.IssueID))
+        .where(issues.c.Status == "Snatched", nzblog.c.NZBName.isnot(None))
+        .limit(limit)
+    )
+    annual_stmt = (
+        select(
+            annuals.c.IssueID,
+            annuals.c.ComicID,
+            nzblog.c.NZBName,
+            nzblog.c.AltNZBName,
+            nzblog.c.PROVIDER,
+            nzblog.c.ID,
+        )
+        .select_from(annuals.join(nzblog, annuals.c.IssueID == nzblog.c.IssueID))
+        .where(annuals.c.Status == "Snatched", nzblog.c.NZBName.isnot(None), annuals.c.Deleted != 1)
+        .limit(limit)
+    )
+
+    with db.get_engine().connect() as conn:
+        rows = list(conn.execute(issue_stmt).mappings().all())
+        if len(rows) < limit:
+            rows.extend(conn.execute(annual_stmt.limit(limit - len(rows))).mappings().all())
+
+    names = []
+    for raw_row in rows:
+        for name in (raw_row.get("NZBName"), raw_row.get("AltNZBName")):
+            normal_name = _normal_download_name(name)
+            if normal_name:
+                names.append(normal_name)
+    history_lookup = _nzbget_history_lookup(names)
+
+    restored = 0
+    failed = 0
+    missing = 0
+    skipped = 0
+    seen_issueids = set()
+
+    for row in rows:
+        issueid = str(row["IssueID"])
+        if issueid in seen_issueids or _pp_queue_contains(issueid):
+            skipped += 1
+            continue
+        seen_issueids.add(issueid)
+
+        found_path = None
+        for name in (row.get("NZBName"), row.get("AltNZBName")):
+            found_path = _find_completed_download_path(name, roots)
+            if found_path is not None:
+                break
+
+        if found_path is None:
+            failed_item = _failed_history_item(row, history_lookup)
+            if failed_item is None:
+                missing += 1
+                continue
+            nzb_name = _normal_download_name(failed_item.get("Name") or failed_item.get("NZBName") or row.get("NZBName"))
+            comicarr.PP_QUEUE.put(
+                {
+                    "nzb_name": nzb_name,
+                    "nzb_folder": failed_item.get("DestDir") or "",
+                    "failed": True,
+                    "issueid": issueid,
+                    "comicid": row["ComicID"],
+                    "apicall": True,
+                    "ddl": False,
+                    "download_info": {"provider": row.get("PROVIDER"), "id": row.get("ID")},
+                }
+            )
+            failed += 1
+        else:
+            comicarr.PP_QUEUE.put(
+                {
+                    "nzb_name": found_path.name,
+                    "nzb_folder": str(found_path),
+                    "failed": False,
+                    "issueid": issueid,
+                    "comicid": row["ComicID"],
+                    "apicall": True,
+                    "ddl": False,
+                    "download_info": None,
+                }
+            )
+        restored += 1
+
+    if restored:
+        logger.info("[DOWNLOADS] Restored %s pending download(s) into post-processing queue.", restored)
+    if failed:
+        logger.info("[DOWNLOADS] Restored %s failed NZBGet download(s) for failed-download handling.", failed)
+    if missing:
+        logger.info(
+            "[DOWNLOADS] %s snatched NZB download(s) were not visible in completed paths yet; they will remain Snatched.",
+            missing,
+        )
+    return {"restored": restored, "failed": failed, "missing": missing, "skipped": skipped}
 
 
 def force_process(
@@ -1075,8 +1287,24 @@ def cdh_monitor(queue, item, nzstat, readd=False):
     from comicarr.helpers import check_file_condition
 
     known_nzb_id = item["nzo_id"] if (comicarr.USE_SABNZBD is True) else item["NZBID"]
-    if any([nzstat["status"] == "file not found", nzstat["status"] == "double-pp"]):
-        logger.warn("Unable to complete post-processing call due to not finding file. [%s]" % item)
+    if nzstat["status"] == "file not found":
+        attempts = int(item.get("cdh_attempts") or 0) + 1
+        item["cdh_attempts"] = attempts
+        max_attempts = 12
+        if attempts <= max_attempts:
+            logger.warn(
+                "Unable to complete post-processing call because the completed file is not visible yet. "
+                "Retrying attempt %s/%s for %s." % (attempts, max_attempts, known_nzb_id)
+            )
+            time.sleep(10)
+            queue.put(item)
+        else:
+            logger.warn(
+                "Unable to complete post-processing call after %s attempts because the completed file was not visible. [%s]"
+                % (max_attempts, item)
+            )
+    elif nzstat["status"] == "double-pp":
+        logger.warn("Unable to complete post-processing call due to double post-processing detection. [%s]" % item)
     elif nzstat["status"] == "nzb removed" or "unhandled status" in str(nzstat["status"]).lower():
         if readd is True:
             logger.warn("NZB seems to have been in a staging process. Will requeue: %s." % known_nzb_id)

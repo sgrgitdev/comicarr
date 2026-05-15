@@ -212,21 +212,34 @@ def find_manga(ctx, name, limit=None, offset=None, sort=None):
     return {"error": "Search returned no results"}
 
 
-def add_comic(ctx, comic_id):
+def add_comic(ctx, comic_id, monitor="all", auto_search=True):
     """Add a comic to the watchlist via importer."""
     from comicarr import importer
 
     try:
         comic_id = str(comic_id)
-        watch = [{"comicid": comic_id, "comicname": None, "seriesyear": None}]
+        watch = [
+            {
+                "comicid": comic_id,
+                "comicname": None,
+                "seriesyear": None,
+                "monitor": monitor,
+                "auto_search": bool(auto_search),
+            }
+        ]
         importer.importer_thread(watch)
     except Exception as e:
         logger.error("[SEARCH] Error adding comic %s: %s" % (comic_id, e))
         return {"success": False, "error": str(e)}
-    return {"success": True, "message": "Successfully queued adding id: %s" % comic_id}
+    return {
+        "success": True,
+        "message": "Successfully queued adding id: %s" % comic_id,
+        "monitor": monitor,
+        "auto_search": bool(auto_search),
+    }
 
 
-def add_manga(ctx, manga_id):
+def add_manga(ctx, manga_id, monitor="all", auto_search=True):
     """Add a manga by MAL ID or MangaDex ID."""
     mal_ok = getattr(ctx.config, "MAL_ENABLED", False) and getattr(ctx.config, "MAL_CLIENT_ID", None)
     mdex_ok = getattr(ctx.config, "MANGADEX_ENABLED", False)
@@ -246,12 +259,23 @@ def add_manga(ctx, manga_id):
             result = importer.addMangaToDB(manga_id)
 
         if result and result.get("status") == "complete":
-            return {
+            response = {
                 "success": True,
                 "message": "Successfully added manga: %s" % result.get("comicname", manga_id),
                 "comicid": result.get("comicid", manga_id),
                 "content_type": "manga",
+                "monitor": monitor,
+                "auto_search": bool(auto_search),
             }
+            if auto_search:
+                from comicarr.app.search import jobs
+
+                response["search"] = jobs.start_comic_search_job(
+                    result.get("comicid", manga_id),
+                    title="Search wanted for %s" % result.get("comicname", manga_id),
+                    mark_wanted=str(monitor or "").lower() == "all",
+                )
+            return response
         return {"success": False, "error": "Failed to add manga: %s" % manga_id}
     except Exception as e:
         logger.error("[SEARCH] Error adding manga %s: %s" % (manga_id, e))
@@ -893,7 +917,11 @@ def search_queue(queue):
                 result = "local"
             else:
                 manual = item.get("manual", False)
-                result = comicarr.search.searchforissue(item.get("issueid"), manual=manual)
+                result = comicarr.search.searchforissue(
+                    item.get("issueid"),
+                    manual=manual,
+                    force_volume_pack=item.get("manga_pack") == "volume",
+                )
             time.sleep(5)
         except Exception as e:
             error = e

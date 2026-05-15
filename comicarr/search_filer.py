@@ -27,6 +27,67 @@ from wsgiref.handlers import format_date_time
 import comicarr
 from comicarr import filechecker, helpers, logger, search
 
+_PARSER_PREFIX_WORDS = {
+    "ablaze",
+    "aftershock",
+    "archie",
+    "boom",
+    "comic",
+    "comics",
+    "dark horse",
+    "dc",
+    "dynamite",
+    "idw",
+    "image",
+    "mad cave",
+    "marvel",
+    "oni",
+    "titan",
+    "valiant",
+    "vault",
+    "zenescope",
+}
+
+
+def _comic_name_pattern(comic_name):
+    tokens = re.findall(r"[A-Za-z0-9]+", comic_name or "")
+    if not tokens:
+        return None
+    return re.compile(r"(?i)(?<![A-Za-z0-9])" + r"[\s._-]+".join(map(re.escape, tokens)) + r"(?![A-Za-z0-9])")
+
+
+def _looks_like_release_prefix(prefix):
+    normalized = re.sub(r"[\s._-]+", " ", prefix or "").strip().lower()
+    if not normalized:
+        return False
+    return any(word in normalized.split(" - ")[-1] or word in normalized for word in _PARSER_PREFIX_WORDS)
+
+
+def normalize_title_for_parser(title, comic_name=None, is_manga=False):
+    """Make common indexer release names parse like normal comic filenames."""
+    if not title:
+        return title
+
+    normalized = title
+    if not is_manga:
+        normalized = re.sub(r"[._]+", " ", normalized)
+        normalized = re.sub(r"(?i)(^|[\s-])no\.?\s+(?=\d)", r"\1#", normalized)
+        normalized = re.sub(r"\s+", " ", normalized).strip()
+
+    pattern = _comic_name_pattern(comic_name)
+    if pattern is None:
+        return normalized
+
+    match = pattern.search(normalized)
+    if not match or match.start() == 0:
+        return normalized
+
+    prefix = normalized[: match.start()]
+    if _looks_like_release_prefix(prefix):
+        normalized = normalized[match.start() :].lstrip(" -")
+
+    return normalized
+
 
 class search_check(object):
     def __init__(self):
@@ -389,7 +450,10 @@ class search_check(object):
 
         # send it to the parser here.
         else:
-            p_comic = filechecker.FileChecker(file=ComicTitle, watchcomic=ComicName)
+            parser_title = normalize_title_for_parser(ComicTitle, ComicName, is_manga=is_manga)
+            if parser_title != ComicTitle:
+                logger.fdebug("normalized search title for parser: %s" % parser_title)
+            p_comic = filechecker.FileChecker(file=parser_title, watchcomic=ComicName)
             parsed_comic = p_comic.listFiles()
 
         logger.fdebug("parsed_info: %s" % parsed_comic)

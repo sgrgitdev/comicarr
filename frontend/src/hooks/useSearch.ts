@@ -142,9 +142,15 @@ export function useAddComic(): UseMutationResult<unknown, Error, string> {
 
   return useMutation({
     mutationFn: (comicId: string) =>
-      apiRequest("POST", "/api/search/add", { id: comicId }),
+      apiRequest("POST", "/api/search/add", {
+        id: comicId,
+        monitor: "all",
+        search: true,
+      }),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["series"] });
+      queryClient.invalidateQueries({ queryKey: ["wanted"] });
+      queryClient.invalidateQueries({ queryKey: ["searchQueue"] });
     },
   });
 }
@@ -157,9 +163,15 @@ export function useAddManga(): UseMutationResult<unknown, Error, string> {
 
   return useMutation({
     mutationFn: (mangaId: string) =>
-      apiRequest("POST", "/api/search/add-manga", { id: mangaId }),
+      apiRequest("POST", "/api/search/add-manga", {
+        id: mangaId,
+        monitor: "all",
+        search: true,
+      }),
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["series"] });
+      queryClient.invalidateQueries({ queryKey: ["wanted"] });
+      queryClient.invalidateQueries({ queryKey: ["searchQueue"] });
     },
   });
 }

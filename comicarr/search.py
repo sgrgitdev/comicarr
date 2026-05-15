@@ -1804,7 +1804,7 @@ def _enqueue_search_item(item):
     return True
 
 
-def searchforissue(issueid=None, new=False, rsschecker=None, manual=False):
+def searchforissue(issueid=None, new=False, rsschecker=None, manual=False, force_volume_pack=False):
     if rsschecker == "yes":
         while comicarr.SEARCHLOCK.locked():
             # logger.info(
@@ -2700,6 +2700,9 @@ def searchforissue(issueid=None, new=False, rsschecker=None, manual=False):
                     booktype = "manga"
                     if chapter_number is None:
                         chapter_number = IssueNumber
+                    if force_volume_pack and volume_number not in (None, "", "None"):
+                        chapter_number = None
+                        IssueNumber = str(volume_number)
 
                 IssueYear = _best_issue_year(StoreDate, IssueDate, SeriesYear)
 
