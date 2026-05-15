@@ -18,6 +18,7 @@ from __future__ import annotations
 
 import datetime
 import json
+import os
 import uuid
 from collections import Counter
 from typing import Any
@@ -31,10 +32,39 @@ from comicarr.tables import annuals, comics, issues, search_job_items, search_jo
 ACTIVE_ITEM_STATUSES = {"queued", "running"}
 TERMINAL_JOB_STATUSES = {"completed", "completed_with_errors", "cancelled", "empty", "error"}
 PROTECTED_ISSUE_STATUSES = {"Downloaded", "Snatched", "Archived"}
+DEFAULT_STALE_RUNNING_SECONDS = 30 * 60
 
 
 def _now() -> str:
     return datetime.datetime.utcnow().replace(microsecond=0).isoformat() + "Z"
+
+
+def _stale_running_seconds() -> int:
+    try:
+        return max(60, int(os.environ.get("COMICARR_SEARCH_STALE_SECONDS", DEFAULT_STALE_RUNNING_SECONDS)))
+    except (TypeError, ValueError):
+        return DEFAULT_STALE_RUNNING_SECONDS
+
+
+def _cutoff_iso(seconds: int) -> str:
+    return (
+        datetime.datetime.utcnow() - datetime.timedelta(seconds=seconds)
+    ).replace(microsecond=0).isoformat() + "Z"
+
+
+def _is_stale_running_item(item: dict[str, Any], seconds: int | None = None) -> bool:
+    if item.get("status") != "running":
+        return False
+    seconds = _stale_running_seconds() if seconds is None else int(seconds)
+    started_at = item.get("started_at")
+    if not started_at:
+        return True
+    return str(started_at) <= _cutoff_iso(seconds)
+
+
+def _timeout_reason(seconds: int) -> str:
+    minutes = max(1, (int(seconds) + 59) // 60)
+    return "Search timed out after %s minute(s); retry when the provider is responsive" % minutes
 
 
 def _row_get(row: dict[str, Any] | None, key: str, default: Any = None) -> Any:
@@ -117,6 +147,43 @@ def _refresh_job_status(conn, job_id: int) -> None:
     if status not in {"queued", "running"}:
         values["finished_at"] = finished_at
     conn.execute(update(search_jobs).where(search_jobs.c.id == job_id).values(**values))
+
+
+def _mark_stale_running_items(conn, older_than_seconds: int | None = None, limit: int = 500) -> int:
+    seconds = _stale_running_seconds() if older_than_seconds is None else max(60, int(older_than_seconds))
+    cutoff = _cutoff_iso(seconds)
+    now = _now()
+    reason = _timeout_reason(seconds)
+
+    rows = conn.execute(
+        select(search_job_items.c.id, search_job_items.c.job_id)
+        .where(
+            search_job_items.c.status == "running",
+            or_(search_job_items.c.started_at.is_(None), search_job_items.c.started_at <= cutoff),
+        )
+        .limit(limit)
+    ).all()
+    if not rows:
+        return 0
+
+    job_ids = sorted({int(row.job_id) for row in rows})
+    item_ids = [int(row.id) for row in rows]
+    conn.execute(
+        update(search_job_items)
+        .where(search_job_items.c.id.in_(item_ids))
+        .values(status="error", finished_at=now, result="error", reason=reason, error=reason)
+    )
+    for job_id in job_ids:
+        _refresh_job_status(conn, job_id)
+
+    logger.warn("[SEARCH-JOB] Marked %s stale running search item(s) as timed out", len(item_ids))
+    return len(item_ids)
+
+
+def mark_stale_running_items(older_than_seconds: int | None = None) -> dict[str, Any]:
+    with db.get_engine().begin() as conn:
+        stale = _mark_stale_running_items(conn, older_than_seconds=older_than_seconds)
+    return {"stale": stale}
 
 
 def _create_job(kind: str, source: str, title: str, total_items: int) -> int:
@@ -514,7 +581,7 @@ def retry_job_item(item_id: int) -> dict[str, Any]:
         item = conn.execute(select(search_job_items).where(search_job_items.c.id == int(item_id))).mappings().first()
         if item is None:
             return {"success": False, "error": "Search job item not found"}
-        if item["status"] == "running":
+        if item["status"] == "running" and not _is_stale_running_item(item):
             return {"success": False, "error": "Search job item is already running"}
         conn.execute(
             update(search_job_items)
@@ -547,7 +614,7 @@ def cancel_job(job_id: int) -> dict[str, Any]:
         )
         conn.execute(
             update(search_job_items)
-            .where(search_job_items.c.job_id == int(job_id), search_job_items.c.status == "queued")
+            .where(search_job_items.c.job_id == int(job_id), search_job_items.c.status.in_(ACTIVE_ITEM_STATUSES))
             .values(status="cancelled", finished_at=now, reason="Search job cancelled")
         )
     return {"success": True, "job_id": int(job_id), "status": "cancelled"}
@@ -557,6 +624,7 @@ def restore_pending_search_jobs(limit: int = 500) -> dict[str, Any]:
     """Requeue DB items that were queued/running before a restart."""
     queued = 0
     with db.get_engine().begin() as conn:
+        _mark_stale_running_items(conn)
         running_items = conn.execute(
             select(search_job_items.c.id, search_job_items.c.job_id)
             .where(search_job_items.c.status == "running")
@@ -597,7 +665,8 @@ def restore_pending_search_jobs(limit: int = 500) -> dict[str, Any]:
 
 def get_jobs_snapshot(limit: int = 150) -> dict[str, Any]:
     limit = max(1, min(int(limit or 150), 500))
-    with db.get_engine().connect() as conn:
+    with db.get_engine().begin() as conn:
+        _mark_stale_running_items(conn)
         job_rows = conn.execute(select(search_jobs).order_by(desc(search_jobs.c.id)).limit(20)).mappings().all()
         item_rows = conn.execute(
             select(search_job_items)

@@ -1,9 +1,10 @@
+import datetime
 import queue
 import threading
 from types import SimpleNamespace
 
 import pytest
-from sqlalchemy import insert, select
+from sqlalchemy import insert, select, update
 
 import comicarr
 from comicarr import db
@@ -208,6 +209,73 @@ def test_restore_pending_search_jobs_requeues_running_items(durable_search_db):
         job_item = conn.execute(select(search_job_items)).mappings().one()
     assert job_item["status"] == "queued"
     assert job_item["reason"] == "Requeued after restart"
+
+
+def test_snapshot_marks_stale_running_items_as_error(durable_search_db, monkeypatch):
+    monkeypatch.setenv("COMICARR_SEARCH_STALE_SECONDS", "60")
+    _insert_wanted_manga(durable_search_db)
+    jobs.start_force_search_job()
+    item = comicarr.SEARCH_QUEUE.get_nowait()
+    assert jobs.mark_item_running(item["search_job_item_id"]) is True
+
+    old_started_at = (datetime.datetime.utcnow() - datetime.timedelta(minutes=10)).replace(
+        microsecond=0
+    ).isoformat() + "Z"
+    with durable_search_db.begin() as conn:
+        conn.execute(
+            update(search_job_items)
+            .where(search_job_items.c.id == item["search_job_item_id"])
+            .values(started_at=old_started_at)
+        )
+
+    snapshot = jobs.get_jobs_snapshot()
+
+    snapshot_item = snapshot["job_items"][0]
+    assert snapshot_item["status"] == "error"
+    assert "timed out" in snapshot_item["reason"]
+    with durable_search_db.connect() as conn:
+        job = conn.execute(select(search_jobs)).mappings().one()
+    assert job["status"] == "completed_with_errors"
+
+
+def test_retry_allows_stale_running_item(durable_search_db, monkeypatch):
+    monkeypatch.setenv("COMICARR_SEARCH_STALE_SECONDS", "60")
+    _insert_wanted_manga(durable_search_db)
+    result = jobs.start_force_search_job()
+    item = comicarr.SEARCH_QUEUE.get_nowait()
+    assert jobs.mark_item_running(item["search_job_item_id"]) is True
+
+    old_started_at = (datetime.datetime.utcnow() - datetime.timedelta(minutes=10)).replace(
+        microsecond=0
+    ).isoformat() + "Z"
+    with durable_search_db.begin() as conn:
+        conn.execute(
+            update(search_job_items)
+            .where(search_job_items.c.id == item["search_job_item_id"])
+            .values(started_at=old_started_at)
+        )
+
+    retried = jobs.retry_job_item(item["search_job_item_id"])
+
+    assert retried["success"] is True
+    assert retried["job_id"] == result["job_id"]
+    restored_item = comicarr.SEARCH_QUEUE.get_nowait()
+    assert restored_item["search_job_item_id"] == item["search_job_item_id"]
+
+
+def test_cancel_job_marks_running_items_cancelled(durable_search_db):
+    _insert_wanted_manga(durable_search_db)
+    result = jobs.start_force_search_job()
+    item = comicarr.SEARCH_QUEUE.get_nowait()
+    assert jobs.mark_item_running(item["search_job_item_id"]) is True
+
+    cancelled = jobs.cancel_job(result["job_id"])
+
+    assert cancelled["success"] is True
+    with durable_search_db.connect() as conn:
+        job_item = conn.execute(select(search_job_items)).mappings().one()
+    assert job_item["status"] == "cancelled"
+    assert job_item["reason"] == "Search job cancelled"
 
 
 def test_start_comic_search_job_can_mark_series_wanted(durable_search_db):

@@ -173,6 +173,32 @@ def get_http_session():
     return _http_session
 
 
+DEFAULT_SEARCH_ITEM_TIMEOUT_SECONDS = 20 * 60
+
+
+def _search_item_timeout_seconds():
+    try:
+        return max(60, int(os.environ.get("COMICARR_SEARCH_ITEM_TIMEOUT_SECONDS", DEFAULT_SEARCH_ITEM_TIMEOUT_SECONDS)))
+    except (TypeError, ValueError):
+        return DEFAULT_SEARCH_ITEM_TIMEOUT_SECONDS
+
+
+def _search_item_timed_out(started_at, timeout_seconds):
+    return bool(timeout_seconds) and time.monotonic() - started_at >= timeout_seconds
+
+
+def _search_item_timeout_reason(timeout_seconds):
+    minutes = max(1, (int(timeout_seconds) + 59) // 60)
+    return "Search timed out after %s minute(s)" % minutes
+
+
+def _mark_foundc_timeout(foundc, timeout_seconds):
+    foundc["status"] = False
+    foundc["timed_out"] = True
+    foundc["reason"] = _search_item_timeout_reason(timeout_seconds)
+    return foundc
+
+
 def search_init(
     ComicName,
     IssueNumber,
@@ -205,6 +231,8 @@ def search_init(
     volume_number=None,
 ):
 
+    search_started_at = time.monotonic()
+    search_timeout_seconds = _search_item_timeout_seconds()
     comicarr.COMICINFO = []
     # unaltered_ComicName = None
     # if filesafe:
@@ -276,6 +304,15 @@ def search_init(
     findit = {}
     findit["status"] = False
 
+    def _timeout_result():
+        reason = _search_item_timeout_reason(search_timeout_seconds)
+        logger.warn("[SEARCH-TIMEOUT] %s for %s #%s" % (reason, ComicName, IssueNumber))
+        findit["status"] = False
+        findit["timed_out"] = True
+        findit["reason"] = reason
+        findit.setdefault("lastrun", 0)
+        return findit, "None"
+
     if provider_list["totalproviders"] == 0:
         logger.error(
             "[WARNING] You have %s search providers enabled. I need at least ONE"
@@ -325,6 +362,8 @@ def search_init(
     findcomiciss, c_number = get_findcomiciss(IssueNumber)
 
     while srchloop <= searchcnt:
+        if _search_item_timed_out(search_started_at, search_timeout_seconds):
+            return _timeout_result()
         """searchmodes:
         rss - will run through the built-cached db of entries
         api - will run through the providers via api (or non-api in the case of
@@ -375,9 +414,13 @@ def search_init(
         prov_count = 0
 
         while tmp_prov_count > prov_count:
+            if _search_item_timed_out(search_started_at, search_timeout_seconds):
+                return _timeout_result()
             logger.info("tmp_prov_count: %s / prov_count: %s" % (tmp_prov_count, prov_count))
             tmp_cmloopit = cmloopit
             while tmp_cmloopit >= 1:
+                if _search_item_timed_out(search_started_at, search_timeout_seconds):
+                    return _timeout_result()
                 if tmp_cmloopit == 4:
                     tmp_IssueNumber = None
                 else:
@@ -586,12 +629,16 @@ def search_init(
                     "ignore_booktype": ignore_booktype,
                     "smode": smode,
                     "findit": findit,
+                    "search_started_at": search_started_at,
+                    "search_timeout_seconds": search_timeout_seconds,
                 }
 
                 if searchmode == "rss":
                     logger.info("RSS searchmode enabled for %s" % ComicName)
                     scarios["RSS"] = "yes"
                     for xx in gen_altnames(ComicName, AlternateSearch, filesafe, smode):
+                        if _search_item_timed_out(search_started_at, search_timeout_seconds):
+                            return _timeout_result()
                         logger.info("comicname searched for: %s" % ComicName)
                         if all([findit["status"] is False, not provider_blocked]):
                             scarios["ComicName"] = xx["ComicName"]
@@ -605,6 +652,8 @@ def search_init(
                     logger.info("API searchmode enabled for %s" % ComicName)
                     scarios["RSS"] = "no"
                     for xx in gen_altnames(ComicName, AlternateSearch, filesafe, smode):
+                        if _search_item_timed_out(search_started_at, search_timeout_seconds):
+                            return _timeout_result()
                         logger.info("comicname searched for: %s" % ComicName)
                         if all([findit["status"] is False, not provider_blocked]):
                             scarios["ComicName"] = xx["ComicName"]
@@ -925,6 +974,8 @@ def NZB_SEARCH(
     chktpb=0,
     ignore_booktype=False,
     smode=None,
+    search_started_at=None,
+    search_timeout_seconds=None,
 ):
 
     if any([allow_packs == 1, allow_packs == "1"]) and all(
@@ -1048,6 +1099,10 @@ def NZB_SEARCH(
     foundc["status"] = False
     foundc["provider"] = nzbprov
     foundc["lastrun"] = provider_stat["lastrun"]
+    if search_started_at is None:
+        search_started_at = time.monotonic()
+    if search_timeout_seconds is None:
+        search_timeout_seconds = _search_item_timeout_seconds()
     done = False
 
     is_info = {
@@ -1093,6 +1148,12 @@ def NZB_SEARCH(
     # if issue is '011' instead of '11' in nzb search results, will not have same
     # results. '011' will return different than '11', as will '009' and '09'.
     while findloop < findcount:
+        if _search_item_timed_out(search_started_at, search_timeout_seconds):
+            logger.warn(
+                "[SEARCH-TIMEOUT] %s for %s #%s"
+                % (_search_item_timeout_reason(search_timeout_seconds), ComicName, IssueNumber)
+            )
+            return _mark_foundc_timeout(foundc, search_timeout_seconds)
         logger.fdebug("findloop: %s / findcount: %s" % (findloop, findcount))
         volume_pack_query = False
         expected_collected_volume = None
@@ -1348,16 +1409,31 @@ def NZB_SEARCH(
                     if localbypass is False and foundc["lastrun"] != 0:
                         diff = check_time(foundc["lastrun"])
                         if diff < pause_the_search:
+                            delay = pause_the_search - int(diff)
+                            remaining = search_timeout_seconds - (time.monotonic() - search_started_at)
+                            if remaining <= 0 or delay > remaining:
+                                logger.warn(
+                                    "[SEARCH-TIMEOUT] Skipping provider delay because %s would exceed item timeout"
+                                    % delay
+                                )
+                                return _mark_foundc_timeout(foundc, search_timeout_seconds)
                             logger.warn(
                                 "[PROVIDER-SEARCH-DELAY][%s] Waiting %s seconds before we search again..."
-                                % (nzbprov, (pause_the_search - int(diff)))
+                                % (nzbprov, delay)
                             )
-                            time.sleep(pause_the_search - int(diff))
+                            time.sleep(delay)
                         else:
                             logger.fdebug(
                                 "[PROVIDER-SEARCH-DELAY][%s] Last search took place %s seconds ago. We're clear..."
                                 % (nzbprov, int(diff))
                             )
+
+                    if _search_item_timed_out(search_started_at, search_timeout_seconds):
+                        logger.warn(
+                            "[SEARCH-TIMEOUT] %s for %s #%s"
+                            % (_search_item_timeout_reason(search_timeout_seconds), ComicName, IssueNumber)
+                        )
+                        return _mark_foundc_timeout(foundc, search_timeout_seconds)
 
                     try:
                         r = get_http_session().get(findurl, params=payload, verify=verify, headers=headers, timeout=30)
@@ -4375,6 +4451,8 @@ def search_the_matrix(scarios):
         chktpb=scarios["chktpb"],
         ignore_booktype=scarios["ignore_booktype"],
         smode=scarios["smode"],
+        search_started_at=scarios.get("search_started_at"),
+        search_timeout_seconds=scarios.get("search_timeout_seconds"),
     )
 
 
