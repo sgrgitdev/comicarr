@@ -3,6 +3,7 @@ import { Search, RefreshCw } from "lucide-react";
 import {
   useWanted,
   useForceSearch,
+  useSearchIssues,
   useBulkUnqueueIssues,
 } from "@/hooks/useQueue";
 import { useToast } from "@/components/ui/toast";
@@ -20,21 +21,18 @@ export default function WantedPage() {
   const limit = 50;
   const offset = page * limit;
 
-  const { data, isLoading, error, refetch } = useWanted(limit, offset);
+  const { data, isLoading, error, refetch } = useWanted(
+    limit,
+    offset,
+    searchQuery,
+  );
   const issues = data?.issues || [];
   const pagination = data?.pagination;
 
   const forceSearch = useForceSearch();
+  const searchIssues = useSearchIssues();
   const bulkUnqueue = useBulkUnqueueIssues();
   const { addToast } = useToast();
-
-  const filteredIssues = searchQuery
-    ? issues.filter(
-        (i) =>
-          i.ComicName?.toLowerCase().includes(searchQuery.toLowerCase()) ||
-          i.Issue_Number?.toLowerCase().includes(searchQuery.toLowerCase()),
-      )
-    : issues;
 
   const handleBulkUnqueue = async () => {
     try {
@@ -53,19 +51,39 @@ export default function WantedPage() {
   };
 
   const handleForceSearch = async () => {
-    if (window.confirm("Manual search may take several minutes. Continue?")) {
-      try {
-        await forceSearch.mutateAsync();
-        addToast({
-          type: "info",
-          message: "Search started for all wanted issues",
-        });
-      } catch (err) {
-        addToast({
-          type: "error",
-          message: `Failed to start search: ${err instanceof Error ? err.message : "Unknown error"}`,
-        });
-      }
+    try {
+      const result = (await forceSearch.mutateAsync()) as {
+        job_id?: number;
+        total_items?: number;
+      };
+      addToast({
+        type: "info",
+        message: `Search job ${result.job_id ? `#${result.job_id} ` : ""}queued for ${result.total_items ?? "wanted"} item(s)`,
+      });
+    } catch (err) {
+      addToast({
+        type: "error",
+        message: `Failed to start search: ${err instanceof Error ? err.message : "Unknown error"}`,
+      });
+    }
+  };
+
+  const handleSearchSelected = async () => {
+    try {
+      const result = (await searchIssues.mutateAsync(selectedIds)) as {
+        job_id?: number;
+        total_items?: number;
+      };
+      addToast({
+        type: "info",
+        message: `Search job ${result.job_id ? `#${result.job_id} ` : ""}queued for ${result.total_items ?? selectedIds.length} issue(s)`,
+      });
+      setSelectedIds([]);
+    } catch (err) {
+      addToast({
+        type: "error",
+        message: `Failed to start selected search: ${err instanceof Error ? err.message : "Unknown error"}`,
+      });
     }
   };
 
@@ -117,14 +135,18 @@ export default function WantedPage() {
             placeholder="Filter wanted issues…"
             aria-label="Filter wanted issues"
             value={searchQuery}
-            onChange={(e) => setSearchQuery(e.target.value)}
+            onChange={(e) => {
+              setSearchQuery(e.target.value);
+              setPage(0);
+              setSelectedIds([]);
+            }}
             shortcut="/"
           />
         </div>
         {searchQuery && (
           <div className="font-mono text-[11px] text-muted-foreground">
-            {filteredIssues.length} match
-            {filteredIssues.length === 1 ? "" : "es"}
+            {pagination?.total ?? issues.length} match
+            {(pagination?.total ?? issues.length) === 1 ? "" : "es"}
           </div>
         )}
       </div>
@@ -149,7 +171,7 @@ export default function WantedPage() {
 
       {!isLoading && !error && (
         <WantedTable
-          issues={filteredIssues}
+          issues={issues}
           pagination={pagination}
           onNextPage={() => {
             setPage((p) => p + 1);
@@ -165,9 +187,10 @@ export default function WantedPage() {
 
       <BulkActionBar
         selectedCount={selectedIds.length}
+        onSearch={handleSearchSelected}
         onSkip={handleBulkUnqueue}
         onClear={() => setSelectedIds([])}
-        isLoading={bulkUnqueue.isPending}
+        isLoading={bulkUnqueue.isPending || searchIssues.isPending}
       />
     </div>
   );

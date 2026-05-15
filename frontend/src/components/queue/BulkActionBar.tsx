@@ -1,9 +1,10 @@
-import { Download, X } from "lucide-react";
+import { Download, Search, X } from "lucide-react";
 import { Button } from "@/components/ui/button";
 
 interface BulkActionBarProps {
   selectedCount: number;
   onMarkWanted?: () => void;
+  onSearch?: () => void;
   onSkip: () => void;
   onClear: () => void;
   isLoading?: boolean;
@@ -12,6 +13,7 @@ interface BulkActionBarProps {
 export default function BulkActionBar({
   selectedCount,
   onMarkWanted,
+  onSearch,
   onSkip,
   onClear,
   isLoading,
@@ -34,6 +36,17 @@ export default function BulkActionBar({
             >
               <Download className="w-4 h-4 mr-2" />
               Mark Wanted
+            </Button>
+          )}
+          {onSearch && (
+            <Button
+              variant="ghost"
+              onClick={onSearch}
+              disabled={isLoading}
+              className="text-white hover:bg-white/20"
+            >
+              <Search className="w-4 h-4 mr-2" />
+              Search selected
             </Button>
           )}
           <Button

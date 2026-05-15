@@ -4219,6 +4219,37 @@ class PostProcessor(object):
         # --- Process each manga file ---
         processed = 0
         last_matched_issueid = None
+
+        def _chapter_values(value):
+            if value is None:
+                return []
+            values = {str(value)}
+            try:
+                numeric = float(value)
+                values.add("%g" % numeric)
+                if numeric.is_integer():
+                    values.add(str(int(numeric)))
+            except (TypeError, ValueError):
+                pass
+            return [v for v in values if v]
+
+        def _chapter_float(row):
+            for key in ("ChapterNumber", "Issue_Number"):
+                try:
+                    return float(row.get(key))
+                except (TypeError, ValueError):
+                    continue
+            return None
+
+        def _chapters_in_range(start, end):
+            all_chapters = db.select_all(select(issues).where(issues.c.ComicID == self.comicid))
+            matched = []
+            for chapter in all_chapters:
+                chapter_number = _chapter_float(chapter)
+                if chapter_number is not None and start <= chapter_number <= end:
+                    matched.append(chapter)
+            return matched
+
         for filepath in manga_files:
             filename = os.path.basename(filepath)
             parsed = parse_manga_filename(filename)
@@ -4239,77 +4270,85 @@ class PostProcessor(object):
                 self._log("Failed to move/copy manga file: %s" % filename)
                 continue
 
-            # --- Match to a chapter/issue in the database ---
-            matching = None
+            # --- Match to chapters/issues in the database ---
+            matching_rows = []
 
             # Try ChapterNumber column first
             if parsed and parsed.get("chapter_number") is not None:
                 ch_num = parsed["chapter_number"]
-                ch_str = "%g" % ch_num
-                matching = db.select_one(
-                    select(issues).where(
-                        and_(
-                            issues.c.ComicID == self.comicid,
-                            issues.c.ChapterNumber == ch_str,
-                        )
-                    )
-                )
-                # Fall back to Issue_Number
-                if matching is None:
+                ch_end = parsed.get("chapter_end")
+                if ch_end is not None and ch_end >= ch_num:
+                    matching_rows = _chapters_in_range(float(ch_num), float(ch_end))
+                if not matching_rows:
+                    ch_values = _chapter_values(ch_num)
                     matching = db.select_one(
                         select(issues).where(
                             and_(
                                 issues.c.ComicID == self.comicid,
-                                issues.c.Issue_Number == ch_str,
+                                issues.c.ChapterNumber.in_(ch_values),
                             )
                         )
                     )
-                    # Also try the float string form (e.g. "165.0")
-                    if matching is None and ch_str != str(ch_num):
-                        matching = db.select_one(
-                            select(issues).where(
-                                and_(
-                                    issues.c.ComicID == self.comicid,
-                                    issues.c.Issue_Number == str(ch_num),
-                                )
+                    if matching is not None:
+                        matching_rows = [matching]
+                # Fall back to Issue_Number
+                if not matching_rows:
+                    matching = db.select_one(
+                        select(issues).where(
+                            and_(
+                                issues.c.ComicID == self.comicid,
+                                issues.c.Issue_Number.in_(_chapter_values(ch_num)),
                             )
                         )
+                    )
+                    if matching is not None:
+                        matching_rows = [matching]
 
-            # Try VolumeNumber column
-            if matching is None and parsed and parsed.get("volume_number") is not None:
+            # Try VolumeNumber column. Volume-only releases commonly contain many chapters.
+            if not matching_rows and parsed and parsed.get("volume_number") is not None:
                 vol_str = str(parsed["volume_number"])
-                matching = db.select_one(
+                vol_values = {vol_str}
+                try:
+                    vol_values.add("%02d" % int(parsed["volume_number"]))
+                except (TypeError, ValueError):
+                    pass
+                matching_rows = db.select_all(
                     select(issues).where(
                         and_(
                             issues.c.ComicID == self.comicid,
-                            issues.c.VolumeNumber == vol_str,
+                            issues.c.VolumeNumber.in_(list(vol_values)),
                         )
                     )
                 )
 
-            if matching:
-                issueid = matching["IssueID"]
-                db.upsert(
-                    "issues",
-                    {"Status": "Downloaded", "Location": filename},
-                    {"IssueID": issueid},
-                )
-                logger.info("%s Matched and marked downloaded: %s (IssueID: %s)" % (module, filename, issueid))
-                self._log("Matched to chapter IssueID: %s" % issueid)
+            if matching_rows:
+                seen_issueids = set()
+                for matching in matching_rows:
+                    issueid = matching["IssueID"]
+                    if issueid in seen_issueids:
+                        continue
+                    seen_issueids.add(issueid)
+                    db.upsert(
+                        "issues",
+                        {"Status": "Downloaded", "Location": filename},
+                        {"IssueID": issueid},
+                    )
+                    logger.info("%s Matched and marked downloaded: %s (IssueID: %s)" % (module, filename, issueid))
+                    self._log("Matched to chapter IssueID: %s" % issueid)
 
-                # Clean up nzblog entry
-                with db.get_engine().begin() as conn:
-                    conn.execute(delete(nzblog).where(nzblog.c.IssueID == issueid))
+                    # Clean up nzblog entry
+                    with db.get_engine().begin() as conn:
+                        conn.execute(delete(nzblog).where(nzblog.c.IssueID == issueid))
 
-                # Update snatched table
-                db.upsert(
-                    "snatched",
-                    {"Status": "Post-Processed"},
-                    {"IssueID": issueid, "Status": "Snatched"},
-                )
+                    # Update snatched table
+                    db.upsert(
+                        "snatched",
+                        {"Status": "Post-Processed"},
+                        {"IssueID": issueid, "Status": "Snatched"},
+                    )
 
-                last_matched_issueid = issueid
-                processed += 1
+                    last_matched_issueid = issueid
+                    processed += 1
             else:
                 logger.warn("%s Unable to match %s to any chapter for %s" % (module, filename, series_name))
 

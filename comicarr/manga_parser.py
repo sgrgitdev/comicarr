@@ -44,7 +44,7 @@ _PAT_GROUP_FULL = re.compile(
     r"^\[(?P<group>[^\]]+)\]\s*"
     r"(?P<series>.+?)\s*"
     r"-\s*c(?P<chapter>\d+(?:\.\d+)?)"
-    r"(?:\s*-\s*c?\d+(?:\.\d+)?)?"  # optional range end (ignored)
+    r"(?:\s*-\s*c?(?P<chapter_end>\d+(?:\.\d+)?))?"
     r"(?:\s*\(v(?P<volume>\d+)\))?"
     r"(?:\s*\[(?P<quality>[^\]]+)\])?"
     r"\s*$",
@@ -79,7 +79,7 @@ _PAT_CHAPTER_LABEL = re.compile(
 _PAT_CHAPTER_PREFIX = re.compile(
     r"^(?P<series>.+?)\s+"
     r"[Cc](?P<chapter>\d+(?:\.\d+)?)"
-    r"(?:\s*-\s*c?\d+(?:\.\d+)?)?"
+    r"(?:\s*-\s*c?(?P<chapter_end>\d+(?:\.\d+)?))?"
     r"\s*$",
 )
 
@@ -118,7 +118,8 @@ def parse_manga_filename(filename):
     Returns:
         A dict with keys ``series_name``, ``chapter_number`` (float or None),
         ``volume_number`` (int or None), ``group`` (str or None), and
-        ``quality`` (str or None).  Returns ``None`` when the filename
+        ``quality`` (str or None). Files with chapter ranges also include
+        ``chapter_end``. Returns ``None`` when the filename
         cannot be parsed or has an invalid extension.
     """
     # Strip directory components if present.
@@ -154,6 +155,7 @@ def _build_result(match):
 
     chapter_raw = groups.get("chapter")
     chapter = _to_chapter_number(chapter_raw)
+    chapter_end = _to_chapter_number(groups.get("chapter_end"))
 
     volume_raw = groups.get("volume")
     volume = int(volume_raw) if volume_raw is not None else None
@@ -170,13 +172,16 @@ def _build_result(match):
     if chapter is None and volume is None:
         return None
 
-    return {
+    result = {
         "series_name": series,
         "chapter_number": chapter,
         "volume_number": volume,
         "group": group,
         "quality": quality,
     }
+    if chapter_end is not None:
+        result["chapter_end"] = chapter_end
+    return result
 
 
 def _to_chapter_number(raw):

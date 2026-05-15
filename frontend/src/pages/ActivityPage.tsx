@@ -3,6 +3,7 @@ import { useSearchParams, Link } from "react-router-dom";
 import {
   useDownloadHistory,
   useDownloadQueue,
+  useRetrySearchJobItem,
   useSearchQueue,
   type HistoryItem,
   type QueueItem,
@@ -131,8 +132,12 @@ function QueueView() {
     refetch: refetchSearch,
   } = useSearchQueue();
   const queue = downloadQueue || [];
-  const searchItems = searchQueue?.items || [];
+  const searchItems =
+    searchQueue?.job_items && searchQueue.job_items.length > 0
+      ? searchQueue.job_items
+      : searchQueue?.items || [];
   const activeSearch = searchQueue?.active || null;
+  const retrySearch = useRetrySearchJobItem();
 
   if (downloadsLoading || searchLoading) {
     return (
@@ -225,7 +230,7 @@ function QueueView() {
       )}
       {searchItems.map((item: SearchQueueItem) => (
         <div
-          key={`search-${item.issueid}-${item.position}`}
+          key={`search-${item.search_job_item_id || item.issueid}-${item.position}`}
           className="grid items-center px-4 py-2 text-[12px] border-b last:border-b-0"
           style={{
             borderColor: "var(--border-soft, var(--border))",
@@ -263,12 +268,32 @@ function QueueView() {
             {item.booktype ? ` · ${item.booktype}` : ""}
           </div>
           <div className="text-muted-foreground truncate">search</div>
-          <StatusPill status="queued" />
-          <div className="font-mono text-[11px] text-muted-foreground">
-            #{item.position}
-            {searchQueue?.size && searchQueue.size > searchItems.length
-              ? `/${searchQueue.size}`
-              : ""}
+          <StatusPill status={item.status || "queued"} />
+          <div className="font-mono text-[11px] text-muted-foreground flex items-center gap-2">
+            {item.status === "error" || item.status === "not_found" ? (
+              <button
+                type="button"
+                className="px-2 py-0.5 rounded border text-[10px] hover:text-[var(--primary)] disabled:opacity-50"
+                style={{ borderColor: "var(--border)" }}
+                disabled={
+                  retrySearch.isPending ||
+                  !(item.search_job_item_id || item.job_item_id)
+                }
+                onClick={() =>
+                  retrySearch.mutate(
+                    Number(item.search_job_item_id || item.job_item_id),
+                  )
+                }
+              >
+                retry
+              </button>
+            ) : null}
+            <span title={item.reason || item.error || undefined}>
+              {item.updated_at ||
+                (item.position
+                  ? `#${item.position}${searchQueue?.size && searchQueue.size > searchItems.length ? `/${searchQueue.size}` : ""}`
+                  : "—")}
+            </span>
           </div>
         </div>
       ))}

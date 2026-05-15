@@ -168,9 +168,9 @@ export default function WantedTable({
       if (onSelectionChange) {
         const newSelection =
           typeof updater === "function" ? updater(rowSelection) : updater;
-        const selectedIds = Object.keys(newSelection)
-          .map((index) => issues[parseInt(index)]?.IssueID)
-          .filter(Boolean) as string[];
+        const selectedIds = Object.keys(newSelection).filter(
+          (issueId) => newSelection[issueId],
+        );
         onSelectionChange(selectedIds);
       }
     },

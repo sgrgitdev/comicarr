@@ -13,7 +13,7 @@ Series domain queries — comics, issues, annuals, importresults tables.
 Uses SQLAlchemy Core via the existing db module.
 """
 
-from sqlalchemy import delete, func, select
+from sqlalchemy import delete, func, or_, select
 
 from comicarr import db
 from comicarr.app.core.database import paginated_query  # noqa: F401 — re-exported
@@ -157,7 +157,7 @@ def unqueue_issue(issue_id):
 # ---------------------------------------------------------------------------
 
 
-def get_wanted_issues(limit=None, offset=None):
+def get_wanted_issues(limit=None, offset=None, search=None):
     """Get all wanted issues joined with comic info."""
     stmt = (
         select(
@@ -180,6 +180,15 @@ def get_wanted_issues(limit=None, offset=None):
         .select_from(t_comics.join(t_issues, t_comics.c.ComicID == t_issues.c.ComicID))
         .where(t_issues.c.Status == "Wanted")
     )
+    if search:
+        term = "%%%s%%" % str(search).lower().strip()
+        stmt = stmt.where(
+            or_(
+                func.lower(t_comics.c.ComicName).like(term),
+                func.lower(t_issues.c.Issue_Number).like(term),
+                func.lower(t_issues.c.IssueName).like(term),
+            )
+        )
     if limit is not None:
         return paginated_query(stmt, limit=limit, offset=offset)
     return db.select_all(stmt)

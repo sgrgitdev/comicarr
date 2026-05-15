@@ -31,14 +31,18 @@ export function useUpcoming(
 export function useWanted(
   limit = 50,
   offset = 0,
+  search = "",
 ): UseQueryResult<WantedResponse> {
   return useQuery({
-    queryKey: ["wanted", limit, offset],
-    queryFn: () =>
-      apiRequest<WantedResponse>(
-        "GET",
-        `/api/wanted?limit=${limit}&offset=${offset}`,
-      ),
+    queryKey: ["wanted", limit, offset, search],
+    queryFn: () => {
+      const params = new URLSearchParams({
+        limit: String(limit),
+        offset: String(offset),
+      });
+      if (search.trim()) params.set("q", search.trim());
+      return apiRequest<WantedResponse>("GET", `/api/wanted?${params}`);
+    },
     staleTime: 2 * 60 * 1000,
   });
 }
@@ -51,6 +55,19 @@ export function useForceSearch(): UseMutationResult<unknown, Error, void> {
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["wanted"] });
       queryClient.invalidateQueries({ queryKey: ["upcoming"] });
+      queryClient.invalidateQueries({ queryKey: ["search", "queue"] });
+    },
+  });
+}
+
+export function useSearchIssues(): UseMutationResult<unknown, Error, string[]> {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (issueIds: string[]) =>
+      apiRequest("POST", "/api/search/issues", { ids: issueIds }),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["wanted"] });
+      queryClient.invalidateQueries({ queryKey: ["search", "queue"] });
     },
   });
 }

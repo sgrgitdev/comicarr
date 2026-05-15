@@ -256,11 +256,12 @@ def queue_missing_series(
 def get_wanted(
     limit: int = Query(None),
     offset: int = Query(0),
+    q: str = Query(None),
     story_arcs: bool = Query(False, alias="story_arcs"),
     ctx: AppContext = Depends(get_context),
 ):
     """Get all wanted issues with optional story arcs and annuals."""
-    return series_service.get_wanted(ctx, limit=limit, offset=offset, include_story_arcs=story_arcs)
+    return series_service.get_wanted(ctx, limit=limit, offset=offset, include_story_arcs=story_arcs, search=q)
 
 
 # ---------------------------------------------------------------------------

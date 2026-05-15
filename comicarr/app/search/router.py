@@ -140,6 +140,41 @@ def force_search(ctx: AppContext = Depends(get_context)):
     return search_service.force_search(ctx)
 
 
+@router.post("/issues", dependencies=[Depends(require_session)])
+def search_issues(
+    request_body: dict = None,
+    ctx: AppContext = Depends(get_context),
+):
+    """Trigger a durable search for selected issue IDs."""
+    if request_body is None:
+        request_body = {}
+    issue_ids = request_body.get("ids") or request_body.get("issue_ids") or []
+    if not isinstance(issue_ids, list) or not issue_ids:
+        return JSONResponse(status_code=400, content={"detail": "Missing issue ids"})
+    result = search_service.search_issue_ids(ctx, issue_ids)
+    if not result.get("success"):
+        return JSONResponse(status_code=400, content={"detail": result.get("error")})
+    return result
+
+
+@router.post("/jobs/items/{item_id}/retry", dependencies=[Depends(require_session)])
+def retry_search_job_item(item_id: int, ctx: AppContext = Depends(get_context)):
+    """Retry a failed/not-found search job item."""
+    result = search_service.retry_search_job_item(ctx, item_id)
+    if not result.get("success"):
+        return JSONResponse(status_code=404, content={"detail": result.get("error")})
+    return result
+
+
+@router.post("/jobs/{job_id}/cancel", dependencies=[Depends(require_session)])
+def cancel_search_job(job_id: int, ctx: AppContext = Depends(get_context)):
+    """Cancel queued items in a durable search job."""
+    result = search_service.cancel_search_job(ctx, job_id)
+    if not result.get("success"):
+        return JSONResponse(status_code=404, content={"detail": result.get("error")})
+    return result
+
+
 @router.post("/rss/force", dependencies=[Depends(require_session)])
 def force_rss(ctx: AppContext = Depends(get_context)):
     """Trigger an RSS feed check."""

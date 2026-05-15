@@ -172,11 +172,11 @@ def refresh_comic(ctx, comic_id):
 
 def queue_issue(ctx, issue_id):
     """Mark an issue as Wanted and trigger search."""
-    from comicarr import search
+    from comicarr.app.search import service as search_service
 
     series_queries.queue_issue(issue_id)
-    search.searchforissue(issue_id)
-    return {"success": True}
+    search_result = search_service.search_issue_ids(ctx, [issue_id])
+    return {"success": True, "search": search_result}
 
 
 def unqueue_issue(ctx, issue_id):
@@ -201,13 +201,20 @@ def bulk_queue_issues(ctx, issue_ids, trigger_search=False):
             errors.append({"id": str(issue_id), "error": str(e)})
 
     searched = 0
+    search_result = None
     if trigger_search and queued_issue_ids:
-        from comicarr import search
+        from comicarr.app.search import service as search_service
 
-        search.searchIssueIDList(queued_issue_ids)
+        search_result = search_service.search_issue_ids(ctx, queued_issue_ids)
         searched = len(queued_issue_ids)
 
-    return {"success": queued > 0, "queued": queued, "searched": searched, "errors": errors}
+    return {
+        "success": queued > 0,
+        "queued": queued,
+        "searched": searched,
+        "search": search_result,
+        "errors": errors,
+    }
 
 
 def bulk_unqueue_issues(ctx, issue_ids):
@@ -245,11 +252,11 @@ def queue_missing_for_series(ctx, comic_id, limit=None, trigger_search=False):
     return result
 
 
-def get_wanted(ctx, limit=None, offset=None, include_story_arcs=False):
+def get_wanted(ctx, limit=None, offset=None, include_story_arcs=False, search=None):
     """Get all wanted issues, optionally with story arcs and annuals."""
     # Issues
     if limit is not None:
-        paginated = series_queries.get_wanted_issues(limit=limit, offset=offset)
+        paginated = series_queries.get_wanted_issues(limit=limit, offset=offset, search=search)
         result = {
             "issues": paginated["results"],
             "pagination": {
@@ -260,7 +267,7 @@ def get_wanted(ctx, limit=None, offset=None, include_story_arcs=False):
             },
         }
     else:
-        result = {"issues": series_queries.get_wanted_issues()}
+        result = {"issues": series_queries.get_wanted_issues(search=search)}
 
     # Story arcs
     if include_story_arcs:

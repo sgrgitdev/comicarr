@@ -130,6 +130,19 @@ async def lifespan(app: FastAPI):
 
     app.state.ctx = ctx
 
+    try:
+        from comicarr.app.search import jobs as search_jobs
+
+        restored = search_jobs.restore_pending_search_jobs()
+        if restored.get("restored"):
+            import comicarr
+
+            comicarr.logger.info("[SEARCH-JOB] Restored durable search queue: %s", restored)
+    except Exception as e:
+        import comicarr
+
+        comicarr.logger.warn("[SEARCH-JOB] Unable to restore durable search queue: %s", e)
+
     # Initialize AI client if configured
     from comicarr import logger
     from comicarr.app.ai.circuit_breaker import CircuitBreaker

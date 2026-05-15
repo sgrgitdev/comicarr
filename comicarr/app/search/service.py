@@ -259,15 +259,13 @@ def add_manga(ctx, manga_id):
 
 
 def force_search(ctx):
-    """Trigger a full search for all wanted issues."""
-    import threading
-
-    from comicarr import search
+    """Trigger a durable full search for all wanted issues."""
+    from comicarr.app.search import jobs
 
     _, status = _ensure_search_queue_status()
     active = status.get("active")
     queue_size = comicarr.SEARCH_QUEUE.qsize()
-    if comicarr.SEARCHLOCK.locked() or queue_size > 0 or active is not None:
+    if comicarr.SEARCHLOCK.locked() or active is not None:
         return {
             "success": True,
             "message": "A search is already running",
@@ -276,14 +274,9 @@ def force_search(ctx):
             "active": active,
         }
 
-    thread = threading.Thread(target=_run_force_search, args=(search,), name="ForceSearch", daemon=True)
-    thread.start()
-    return {
-        "success": True,
-        "message": "Search initiated",
-        "status": "started",
-        "queue_size": comicarr.SEARCH_QUEUE.qsize(),
-    }
+    result = jobs.start_force_search_job(ctx)
+    result["queue_size"] = comicarr.SEARCH_QUEUE.qsize()
+    return result
 
 
 def _run_force_search(search_module):
@@ -293,8 +286,34 @@ def _run_force_search(search_module):
         logger.exception("[SEARCH] Force search failed: %s" % e)
 
 
+def search_issue_ids(ctx, issue_ids):
+    """Trigger a durable search job for selected issue IDs."""
+    from comicarr.app.search import jobs
+
+    cleaned = [str(issue_id) for issue_id in issue_ids or [] if str(issue_id).strip()]
+    if not cleaned:
+        return {"success": False, "error": "No issue IDs supplied"}
+    result = jobs.start_issue_search_job(cleaned)
+    result["queue_size"] = comicarr.SEARCH_QUEUE.qsize()
+    return result
+
+
+def retry_search_job_item(ctx, item_id):
+    """Retry a single durable search job item."""
+    from comicarr.app.search import jobs
+
+    return jobs.retry_job_item(int(item_id))
+
+
+def cancel_search_job(ctx, job_id):
+    """Cancel queued items for a durable search job."""
+    from comicarr.app.search import jobs
+
+    return jobs.cancel_job(int(job_id))
+
+
 def get_search_queue(ctx, limit=100):
-    """Return a safe snapshot of the in-memory search queue."""
+    """Return a safe snapshot of the in-memory and durable search queues."""
     try:
         limit = int(limit)
     except (TypeError, ValueError):
@@ -329,7 +348,9 @@ def get_search_queue(ctx, limit=100):
         except (TypeError, ValueError):
             active_seconds = None
 
-    return {
+    from comicarr.app.search import jobs
+
+    snapshot = {
         "locked": comicarr.SEARCHLOCK.locked(),
         "size": len(queued),
         "returned": len(items),
@@ -341,6 +362,8 @@ def get_search_queue(ctx, limit=100):
         "last_error": last_error,
         "items": items,
     }
+    snapshot.update(jobs.get_jobs_snapshot(limit=limit))
+    return snapshot
 
 
 def force_rss(ctx):
@@ -790,6 +813,8 @@ def ignored_publisher_check(publisher):
 def search_queue(queue):
     import queue as queue_module
 
+    from comicarr.app.search import jobs
+
     while True:
         item = None
         result = None
@@ -811,6 +836,11 @@ def search_queue(queue):
             continue
 
         try:
+            job_item_id = item.get("search_job_item_id") if isinstance(item, dict) else None
+            if job_item_id and not jobs.mark_item_running(job_item_id):
+                result = "skipped"
+                continue
+
             _set_search_active(item)
             issueid = item.get("issueid")
             gumbo_line = True
@@ -869,6 +899,8 @@ def search_queue(queue):
             error = e
             logger.exception("[SEARCH-QUEUE] Error processing item %s: %s" % (item, e))
         finally:
+            if isinstance(item, dict):
+                jobs.mark_item_finished(item.get("search_job_item_id"), result=result, error=error)
             _finish_search_active(item, result=result, error=error)
             queue.task_done()
             if comicarr.SEARCHLOCK.locked():

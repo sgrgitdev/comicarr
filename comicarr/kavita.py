@@ -10,9 +10,8 @@ import requests
 import comicarr
 from comicarr import logger
 
-
 _SCAN_LOCK = threading.Lock()
-_LAST_SCAN_AT = 0
+_LAST_SCAN_AT_BY_LIBRARY = {}
 
 
 def _config_value(name, default=None):
@@ -63,17 +62,23 @@ def trigger_library_scan(reason=None, library_kind=None):
         logger.warn("[KAVITA] Scan trigger enabled, but host, username, password, or library ids are missing.")
         return False
 
-    global _LAST_SCAN_AT
     now = time.time()
+    eligible_library_ids = []
     with _SCAN_LOCK:
-        if now - _LAST_SCAN_AT < min_interval:
-            logger.fdebug("[KAVITA] Scan trigger skipped due to minimum interval.")
-            return False
-        _LAST_SCAN_AT = now
+        for library_id in library_ids:
+            last_scan_at = _LAST_SCAN_AT_BY_LIBRARY.get(str(library_id), 0)
+            if now - last_scan_at < min_interval:
+                logger.fdebug("[KAVITA] Scan trigger skipped for library id %s due to minimum interval." % library_id)
+                continue
+            _LAST_SCAN_AT_BY_LIBRARY[str(library_id)] = now
+            eligible_library_ids.append(library_id)
+
+    if not eligible_library_ids:
+        return False
 
     thread = threading.Thread(
         target=_trigger_library_scan,
-        args=(host, username, password, library_ids, reason),
+        args=(host, username, password, eligible_library_ids, reason),
         name="KavitaScanTrigger",
         daemon=True,
     )

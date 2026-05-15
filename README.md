@@ -15,6 +15,8 @@ Comicarr is a modernized fork of Mylar3, rebuilt with a React 19 frontend and fo
 - **Direct Downloads** - Mega, MediaFire, Pixeldrain support
 - **Weekly Pull Lists** - Track upcoming releases up to 4 weeks ahead
 - **Story Arc Management** - Organize and track story arcs across series
+- **Durable Search Activity** - Force and bulk searches are tracked as database-backed jobs that can resume after restart
+- **Manga-aware Importing** - Manga chapter, chapter-range, and volume imports can update Kavita manga libraries after processing
 - **Dark/Light Themes** - Native theme support with system preference detection
 - **Real-time Updates** - Server-Sent Events for live status without page refreshes
 
@@ -29,6 +31,7 @@ docker run -d \
   -e PUID=1000 \
   -e PGID=1000 \
   -e TZ=Etc/UTC \
+  -e COMICARR_SQLITE_JOURNAL_MODE=DELETE \
   -v /path/to/config:/config \
   -v /path/to/comics:/comics \
   -v /path/to/manga:/manga \
@@ -43,6 +46,8 @@ curl -o docker-compose.yml https://raw.githubusercontent.com/frankieramirez/comi
 # Edit paths in docker-compose.yml, then:
 docker-compose up -d
 ```
+
+For Docker Desktop on Windows, keep `COMICARR_SQLITE_JOURNAL_MODE=DELETE` when `/config` is a Windows bind mount. WAL mode is faster on native Linux storage, but Windows bind mounts can leave SQLite sidecar files in a state that blocks startup or long-running search jobs.
 
 ### Manual Installation
 
@@ -90,7 +95,8 @@ On first run:
 1. Get a Comic Vine API key from https://comicvine.gamespot.com/api/
 2. Configure download clients (SABnzbd, NZBGet, or torrent clients)
 3. Set your comic library and download paths
-4. Optionally configure Metron credentials for enhanced search
+4. Optionally configure MangaDex/MAL and Kavita if you want manga automation and Kavita library scans
+5. Optionally configure Metron credentials for enhanced search
 
 ## Project Structure
 

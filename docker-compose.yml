@@ -17,5 +17,8 @@ services:
       - PUID=1000
       - PGID=1000
       - TZ=Etc/UTC
+      # Recommended for Docker Desktop on Windows bind mounts.
+      # Native Linux storage can use WAL for better write concurrency.
+      - COMICARR_SQLITE_JOURNAL_MODE=DELETE
     restart: unless-stopped
     stop_grace_period: 30s

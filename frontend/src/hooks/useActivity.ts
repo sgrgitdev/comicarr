@@ -1,4 +1,4 @@
-import { useQuery } from "@tanstack/react-query";
+import { useMutation, useQuery, useQueryClient } from "@tanstack/react-query";
 import { apiRequest } from "@/lib/api";
 
 export interface HistoryItem {
@@ -51,6 +51,18 @@ export interface SearchQueueItem {
   content_type?: string;
   chapter_number?: string;
   volume_number?: string;
+  status?: string;
+  result?: string;
+  reason?: string;
+  error?: string;
+  attempts?: number;
+  updated_at?: string;
+  created_at?: string;
+  started_at?: string;
+  finished_at?: string;
+  search_job_id?: number;
+  search_job_item_id?: number;
+  job_item_id?: number;
 }
 
 interface SearchQueueResponse {
@@ -64,6 +76,16 @@ interface SearchQueueResponse {
   last_completed: (SearchQueueItem & { result?: string; error?: string }) | null;
   last_error: string | null;
   items: SearchQueueItem[];
+  job_items?: SearchQueueItem[];
+  jobs?: Array<{
+    id: number;
+    title: string;
+    kind: string;
+    status: string;
+    total_items: number;
+    message?: string;
+    counts?: Record<string, number>;
+  }>;
 }
 
 export function useDownloadHistory(limit: number, offset: number) {
@@ -93,5 +115,16 @@ export function useSearchQueue() {
     queryFn: () => apiRequest<SearchQueueResponse>("GET", "/api/search/queue?limit=150"),
     staleTime: 5 * 1000,
     refetchInterval: 5 * 1000,
+  });
+}
+
+export function useRetrySearchJobItem() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (itemId: number) =>
+      apiRequest("POST", `/api/search/jobs/items/${itemId}/retry`),
+    onSuccess: () => {
+      queryClient.invalidateQueries({ queryKey: ["search", "queue"] });
+    },
   });
 }

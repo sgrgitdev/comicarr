@@ -653,6 +653,58 @@ ai_cache = Table(
 )
 
 # ---------------------------------------------------------------------------
+# search_jobs
+# ---------------------------------------------------------------------------
+search_jobs = Table(
+    "search_jobs",
+    metadata,
+    Column("id", Integer, primary_key=True, autoincrement=True),
+    Column("job_key", Text, unique=True),
+    Column("kind", Text),
+    Column("source", Text),
+    Column("title", Text),
+    Column("status", Text),
+    Column("created_at", Text),
+    Column("started_at", Text),
+    Column("finished_at", Text),
+    Column("total_items", Integer, server_default="0"),
+    Column("message", Text),
+    Column("error", Text),
+    Column("cancel_requested", Integer, server_default="0"),
+)
+
+# ---------------------------------------------------------------------------
+# search_job_items
+# ---------------------------------------------------------------------------
+search_job_items = Table(
+    "search_job_items",
+    metadata,
+    Column("id", Integer, primary_key=True, autoincrement=True),
+    Column("job_id", Integer),
+    Column("position", Integer),
+    Column("issueid", Text),
+    Column("comicid", Text),
+    Column("comicname", Text),
+    Column("seriesyear", Text),
+    Column("issuenumber", Text),
+    Column("booktype", Text),
+    Column("content_type", Text),
+    Column("chapter_number", Text),
+    Column("volume_number", Text),
+    Column("status", Text),
+    Column("attempts", Integer, server_default="0"),
+    Column("created_at", Text),
+    Column("started_at", Text),
+    Column("finished_at", Text),
+    Column("result", Text),
+    Column("reason", Text),
+    Column("error", Text),
+    Column("provider", Text),
+    Column("download_id", Text),
+    Column("payload_json", Text),
+)
+
+# ---------------------------------------------------------------------------
 # Indexes
 # ---------------------------------------------------------------------------
 
@@ -683,6 +735,9 @@ Index("storyarcs_status_storyarc", storyarcs.c.Status, storyarcs.c.StoryArc)
 Index("ai_activity_timestamp", ai_activity_log.c.timestamp)
 Index("ai_activity_entity_id", ai_activity_log.c.entity_id)
 Index("ai_metadata_entity", ai_metadata_history.c.entity_type, ai_metadata_history.c.entity_id)
+Index("search_jobs_status", search_jobs.c.status)
+Index("search_job_items_job_status", search_job_items.c.job_id, search_job_items.c.status)
+Index("search_job_items_issueid", search_job_items.c.issueid)
 
 # Lookup table: table name -> Table object (used by upsert shim)
 TABLE_MAP = {
@@ -713,6 +768,8 @@ TABLE_MAP = {
     "ai_activity_log": ai_activity_log,
     "ai_metadata_history": ai_metadata_history,
     "ai_cache": ai_cache,
+    "search_jobs": search_jobs,
+    "search_job_items": search_job_items,
 }
 
 
