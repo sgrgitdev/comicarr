@@ -31,7 +31,7 @@ import time
 from sqlalchemy import Integer, and_, delete, func, inspect, or_, select
 
 import comicarr
-from comicarr import db, filechecker, getimage, helpers, logger, notifiers, updater, weeklypull
+from comicarr import db, filechecker, getimage, helpers, kavita, logger, notifiers, updater, weeklypull
 from comicarr.config import get_manga_destination
 from comicarr.manga_parser import parse_manga_filename
 from comicarr.tables import (
@@ -4313,6 +4313,9 @@ class PostProcessor(object):
             else:
                 logger.warn("%s Unable to match %s to any chapter for %s" % (module, filename, series_name))
 
+        if processed > 0:
+            kavita.trigger_library_scan("manga import for %s" % series_name, library_kind="manga")
+
         # Update Have count for the series
         if processed > 0:
             have_count = db.select_one(
@@ -5219,6 +5222,8 @@ class PostProcessor(object):
             # comicarr.CONFIG.WEEKFOLDER = will *copy* the post-processed file to the weeklypull list folder for the given week.
             # comicarr.CONFIG.SEND2READ = will add the post-processed file to the readinglits
             weeklypull.weekly_check(comicid, issuenum, file=(nfilename + ext), path=dst, module=module, issueid=issueid)
+
+        kavita.trigger_library_scan("%s %s import" % (series, dispiss), library_kind="comic")
 
         # retrieve/create the corresponding comic objects
         if comicarr.CONFIG.ENABLE_EXTRA_SCRIPTS:

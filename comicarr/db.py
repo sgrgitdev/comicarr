@@ -97,7 +97,11 @@ def _apply_sqlite_pragmas(dbapi_conn, _connection_record):
     cursor.execute("PRAGMA synchronous = NORMAL")
     cursor.execute("PRAGMA mmap_size = 67108864")  # 64MB
     cursor.execute("PRAGMA journal_size_limit = 67108864")  # 64MB
-    cursor.execute("PRAGMA journal_mode = WAL")
+    journal_mode = os.environ.get("COMICARR_SQLITE_JOURNAL_MODE", "WAL").strip().upper()
+    if journal_mode not in {"DELETE", "TRUNCATE", "PERSIST", "MEMORY", "WAL", "OFF"}:
+        logger.warn("Invalid COMICARR_SQLITE_JOURNAL_MODE '%s'; falling back to WAL.", journal_mode)
+        journal_mode = "WAL"
+    cursor.execute("PRAGMA journal_mode = %s" % journal_mode)
     cursor.execute("PRAGMA cache_size = -64000")  # 64MB
     cursor.close()
 
