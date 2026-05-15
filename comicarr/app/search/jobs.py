@@ -329,13 +329,17 @@ def start_force_search_job(ctx=None) -> dict[str, Any]:
     return start_search_job(items, kind="force", source="wanted", title="Search all wanted")
 
 
-def start_issue_search_job(issue_ids: list[str], title: str = "Search selected issues") -> dict[str, Any]:
+def start_issue_search_job(
+    issue_ids: list[str],
+    title: str = "Search selected issues",
+    priority: bool = True,
+) -> dict[str, Any]:
     """Create and enqueue a durable search job for explicit issue IDs."""
     rows = _issue_rows(issue_ids=issue_ids, wanted_only=False)
     items = _rows_to_items(rows)
     found_ids = {item["issueid"] for item in items}
     missing = [str(issue_id) for issue_id in issue_ids if str(issue_id) not in found_ids]
-    result = start_search_job(items, kind="manual", source="selected", title=title)
+    result = start_search_job(items, kind="manual", source="selected", title=title, priority=priority)
     result["missing_issue_ids"] = missing
     return result
 
@@ -526,7 +530,7 @@ def retry_job_item(item_id: int) -> dict[str, Any]:
     payload = json.loads(item.get("payload_json") or "{}")
     payload["search_job_id"] = int(item["job_id"])
     payload["search_job_item_id"] = int(item_id)
-    _enqueue_payload(payload)
+    _enqueue_payload(payload, priority=True)
     return {"success": True, "job_id": int(item["job_id"]), "item_id": int(item_id), "status": "queued"}
 
 

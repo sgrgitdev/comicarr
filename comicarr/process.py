@@ -66,6 +66,9 @@ class Process(object):
                 apicall=self.apicall,
                 ddl=self.ddl,
             )
+            if getattr(PostProcess, "in_progress", False):
+                logger.info("Another item is post-processing still; skipping duplicate direct start.")
+                return {"mode": "busy"}
             if any(
                 [
                     self.nzb_name == "Manual Run",

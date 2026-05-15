@@ -79,14 +79,68 @@ def normalize_title_for_parser(title, comic_name=None, is_manga=False):
         return normalized
 
     match = pattern.search(normalized)
-    if not match or match.start() == 0:
+    if not match:
         return normalized
 
-    prefix = normalized[: match.start()]
-    if _looks_like_release_prefix(prefix):
-        normalized = normalized[match.start() :].lstrip(" -")
+    if match.start() > 0:
+        prefix = normalized[: match.start()]
+        if _looks_like_release_prefix(prefix):
+            normalized = normalized[match.start() :].lstrip(" -")
+
+    if not is_manga:
+        # Some comic indexers publish original-series issues as
+        # "Series - Vol.1 06 (2002)". The legacy parser can detect the volume
+        # and issue, but it often leaves "Vol 1" inside the parsed series name.
+        # Reorder it to "Series 06 v1 (2002)" so matching remains issue-based.
+        name = normalized[: len(comic_name or "")] if comic_name else ""
+        if name:
+            normalized = re.sub(
+                r"(?i)^("
+                + re.escape(name)
+                + r")\s*(?:-\s*)?vol(?:ume)?\.?\s*(\d{1,4})\s+((?!(?:19|20)\d{2}\b)\d+(?:\.\d+)?)\b",
+                r"\1 \3 v\2",
+                normalized,
+            )
+            normalized = re.sub(
+                r"(?i)^("
+                + re.escape(name)
+                + r")\s*(?:-\s*)?vol(?:ume)?\.?\s*(\d{1,4})\b.*?\b((?:19|20)\d{2})\b.*$",
+                r"\1 v\2 (\3)",
+                normalized,
+            )
 
     return normalized
+
+
+_COLLECTED_VOLUME_BOOKTYPES = {"tpb", "gn", "hc", "tpb/gn/hc/one-shot"}
+
+
+def _parsed_volume_number(parsed_comic):
+    volume = parsed_comic.get("series_volume")
+    if not volume:
+        return None
+    digits = re.sub(r"[^0-9]", "", str(volume))
+    if not digits:
+        return None
+    try:
+        return int(digits)
+    except ValueError:
+        return None
+
+
+def _is_collected_volume_candidate(parsed_comic, issue_number, volume_pack_search, expected_volume=None):
+    if not volume_pack_search or issue_number is None:
+        return False
+    if str(parsed_comic.get("booktype") or "").lower() not in _COLLECTED_VOLUME_BOOKTYPES:
+        return False
+    if parsed_comic.get("issue_number") not in (None, "", "None"):
+        return False
+    volume_number = _parsed_volume_number(parsed_comic)
+    if volume_number is None:
+        return False
+    if expected_volume is not None and volume_number != expected_volume:
+        return False
+    return True
 
 
 class search_check(object):
@@ -124,9 +178,13 @@ class search_check(object):
             intIss = is_info["intIss"]
             chktpb = is_info["chktpb"]
             provider_stat = is_info["provider_stat"]
+            volume_pack_search = is_info.get("volume_pack_search", False)
+            expected_collected_volume = is_info.get("expected_collected_volume")
             is_manga = str(content_type or "").lower() == "manga" or str(booktype or "").lower() == "manga"
         else:
             is_manga = False
+            volume_pack_search = False
+            expected_collected_volume = None
 
         try:
             pack = entry["pack"]
@@ -461,10 +519,15 @@ class search_check(object):
             "booktype: %s / parsed_booktype: %s [ignore_booktype: %s]"
             % (booktype, parsed_comic["booktype"], ignore_booktype)
         )
+        collected_volume_candidate = _is_collected_volume_candidate(
+            parsed_comic, IssueNumber, volume_pack_search, expected_collected_volume
+        )
+
         if parsed_comic["parse_status"] == "success" and (
             all([booktype is None, parsed_comic["booktype"] == "issue"])
             or all([booktype == "Print", parsed_comic["booktype"] == "issue"])
             or all([is_manga, parsed_comic["booktype"] in ("issue", "manga")])
+            or collected_volume_candidate
             or str(booktype or "").lower() == str(parsed_comic["booktype"] or "").lower()
             or all(
                 [
@@ -499,7 +562,7 @@ class search_check(object):
                         " to search, but retaining this result just in case." % ComicTitle
                     )
                     alt_match = True
-        elif booktype != parsed_comic["booktype"] and ignore_booktype is False:
+        elif booktype != parsed_comic["booktype"] and ignore_booktype is False and not collected_volume_candidate:
             logger.fdebug(
                 "Booktypes do not match. Looking for %s, this is a %s."
                 " Ignoring this result." % (booktype, parsed_comic["booktype"])
@@ -560,6 +623,9 @@ class search_check(object):
             yearmatch = True
         elif is_manga:
             logger.fdebug("[MANGA] Bypassing year check for manga chapter matching.")
+            yearmatch = True
+        elif collected_volume_candidate:
+            logger.fdebug("Collected volume fallback detected. Bypassing strict issue year check.")
             yearmatch = True
         elif ComVersChk == 0 and parsed_comic["issue_year"] is None:
             logger.fdebug(
@@ -702,6 +768,10 @@ class search_check(object):
                 ]
             ) and (int(F_ComicVersion) == int(D_ComicVersion) or int(F_ComicVersion) == int(S_ComicVersion)):
                 logger.fdebug("We matched on versions...%s" % fndcomicversion)
+            elif collected_volume_candidate:
+                logger.fdebug(
+                    "Collected volume fallback matched on TPB volume %s, not series volume." % fndcomicversion
+                )
             else:
                 if any(
                     [
@@ -916,6 +986,7 @@ class search_check(object):
                     or all([cmloopit == 4, findcomiciss is None, pc_in is None])
                     or all([cmloopit == 4, findcomiciss is None, pc_in == 1])
                     or all([cmloopit == 4, findcomiciss == 1, pc_in is None])
+                    or collected_volume_candidate
                 ):
                     nowrite = False
                     logger.info(

@@ -31,6 +31,24 @@ def _local_host_check():
     return _is_local_indexer_host
 
 
+def _comic_bases():
+    from comicarr.search import _build_comic_search_bases
+
+    return _build_comic_search_bases
+
+
+def _collected_searches():
+    from comicarr.search import _build_collected_volume_searches
+
+    return _build_collected_volume_searches
+
+
+def _generate_id():
+    from comicarr.search import generate_id
+
+    return generate_id
+
+
 class TestLocalIndexerHost:
     def test_host_docker_internal_is_local(self):
         is_local = _local_host_check()
@@ -43,6 +61,70 @@ class TestLocalIndexerHost:
     def test_public_host_is_not_local(self):
         is_local = _local_host_check()
         assert is_local("https://example.com/api") is False
+
+
+class TestBuildComicSearchBases:
+    def test_keeps_original_title_before_article_stripped_fallback(self):
+        build = _comic_bases()
+        bases = build("The Ultimates", None, "6", "Print")
+
+        assert bases[0] == "the%20ultimates"
+        assert "ultimates" in bases
+
+    def test_adds_default_volume_one_variants_for_issue_searches(self):
+        build = _comic_bases()
+        bases = build("The Ultimates", None, "6", "Print")
+
+        assert "the%20ultimates%20vol%201" in bases
+        assert "the%20ultimates%20v1" in bases
+
+    def test_uses_explicit_comic_version_when_present(self):
+        build = _comic_bases()
+        bases = build("Some Series", "3", "12", "Print")
+
+        assert "some%20series%20vol%203" in bases
+        assert "some%20series%20v3" in bases
+
+    def test_does_not_add_comic_volume_variants_for_manga(self):
+        build = _comic_bases()
+        bases = build("One Piece", None, "1044", "manga")
+
+        assert bases == ["one%20piece"]
+
+
+class TestBuildCollectedVolumeSearches:
+    def test_adds_likely_collected_volume_queries_for_issue_six(self):
+        build = _collected_searches()
+        searches = build("The Power Fantasy", "6", "Print")
+
+        assert "the%20power%20fantasy%20vol%2002" in searches
+        assert "the%20power%20fantasy%20vol%202" in searches
+        assert "the%20power%20fantasy%20v02" in searches
+        assert "power%20fantasy%20vol%2002" in searches
+
+    def test_skips_manga(self):
+        build = _collected_searches()
+
+        assert build("One Piece", "1044", "manga") == []
+
+
+class TestGenerateProviderId:
+    def test_newznab_prowlarr_download_uses_link_token_not_download_path(self):
+        generate_id = _generate_id()
+        provider = {"type": "newznab"}
+        link = (
+            "http://host.docker.internal:9696/1/download?"
+            "apikey=redacted&link=provider-guid-token&file=The.Ultimates.006"
+        )
+
+        assert generate_id(provider, link, "The Ultimates") == "provider-guid-token"
+
+    def test_newznab_prowlarr_download_can_fall_back_to_file_title(self):
+        generate_id = _generate_id()
+        provider = {"type": "newznab"}
+        link = "http://host.docker.internal:9696/1/download?apikey=redacted&file=The.Ultimates.006"
+
+        assert generate_id(provider, link, "The Ultimates") == "The.Ultimates.006"
 
 
 class TestBuildMangaSearchTermsChapterOnly:

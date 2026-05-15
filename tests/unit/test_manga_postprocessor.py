@@ -22,6 +22,7 @@ Tests cover the _process_manga() method and the manga branch in Process().
 """
 
 import queue
+import zipfile
 from unittest.mock import MagicMock, patch
 
 import comicarr
@@ -55,6 +56,66 @@ def _make_pp(nzb_name, nzb_folder, comicid=None, issueid=None, apicall=False):
             apicall=apicall,
         )
     return pp, mock_queue
+
+
+class TestWrappedArchivePreparation:
+    """Tests for NZB/scene wrappers that hide the actual comic archive."""
+
+    def test_extracts_nested_rar_as_cbr_with_release_name(self, tmp_path):
+        release_dir = tmp_path / "Image.Comics.-.The.Power.Fantasy.No.06.2025.Retail.Comic.eBook-BitBook"
+        release_dir.mkdir()
+        wrapper = release_dir / "bbgv7d8a.zip"
+        with zipfile.ZipFile(wrapper, "w") as zf:
+            zf.writestr("bbgv7d8.rar", b"rar payload")
+            zf.writestr("file_id.diz", b"info")
+
+        pp, _mock_queue = _make_pp(
+            nzb_name="Image.Comics-The.Power.Fantasy.No.06.2025.Retail.Comic",
+            nzb_folder=str(tmp_path),
+            comicid="159212",
+            issueid="1096469",
+            apicall=True,
+        )
+
+        with patch("comicarr.postprocessor.db") as mock_db:
+            mock_db.select_one.return_value = {
+                "ComicName": "The Power Fantasy",
+                "Issue_Number": "6",
+                "ReleaseDate": "2025-04-02",
+                "IssueDate": "2025-04-02",
+            }
+            prepared = pp._prepare_wrapped_archives()
+
+        expected = release_dir / "The Power Fantasy 6 (2025).cbr"
+        assert prepared == [str(expected)]
+        assert expected.read_bytes() == b"rar payload"
+
+    def test_copies_image_zip_as_cbz(self, tmp_path):
+        wrapper = tmp_path / "The.Power.Fantasy.001.2024.zip"
+        with zipfile.ZipFile(wrapper, "w") as zf:
+            zf.writestr("001.jpg", b"image")
+            zf.writestr("002.jpg", b"image")
+
+        pp, _mock_queue = _make_pp(
+            nzb_name="The.Power.Fantasy.001.2024",
+            nzb_folder=str(tmp_path),
+            comicid="159212",
+            issueid="1066459",
+            apicall=True,
+        )
+
+        with patch("comicarr.postprocessor.db") as mock_db:
+            mock_db.select_one.return_value = {
+                "ComicName": "The Power Fantasy",
+                "Issue_Number": "1",
+                "ReleaseDate": "2024-08-07",
+                "IssueDate": "2024-08-07",
+            }
+            prepared = pp._prepare_wrapped_archives()
+
+        expected = tmp_path / "The Power Fantasy 1 (2024).cbz"
+        assert prepared == [str(expected)]
+        assert zipfile.is_zipfile(expected)
 
 
 class TestMangaBranchDetection:

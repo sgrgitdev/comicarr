@@ -1013,19 +1013,10 @@ def NZB_SEARCH(
     comyear = str(ComicYear)
     findcomic = ComicName
 
-    cm1 = re.sub(r"[\/\-]", " ", findcomic)
-    # remove 'and' & '&' from the search pattern entirely
-    # (broader results, will filter out later)
-    cm = re.sub("\\band\\b", "", cm1.lower())
-
-    # remove 'the' from the search pattern to accomodate naming differences
-    cm = re.sub("\\bthe\\b", "", cm.lower())
-
-    cm = re.sub(r"[\&\:\?\,]", "", str(cm))
-    cm = re.sub(r"\s+", " ", cm)
-    # replace whitespace in comic name with %20 for api search
-    cm = re.sub(" ", "%20", str(cm))
-    cm = re.sub("'", "%27", str(cm))
+    comsearch_bases = _build_comic_search_bases(findcomic, ComicVersion, IssueNumber, booktype)
+    collected_volume_searches = []
+    if cmloopit == 1:
+        collected_volume_searches = _build_collected_volume_searches(findcomic, IssueNumber, booktype)
 
     if IssueNumber is not None:
         intIss = helpers.issuedigits(IssueNumber)
@@ -1048,8 +1039,8 @@ def NZB_SEARCH(
         isssearch = None
         findcomiciss = None
 
-    comsearch = cm
-    findcount = 1  # this could be a loop in the future possibly
+    comsearch = comsearch_bases[0] if comsearch_bases else ""
+    findcount = max(1, len(comsearch_bases) + len(collected_volume_searches))
 
     findloop = 0
     # foundcomic = []
@@ -1091,6 +1082,9 @@ def NZB_SEARCH(
         "smode": smode,
         "provider_stat": provider_stat,
         "foundc": foundc,
+        "allow_packs": allow_packs,
+        "volume_pack_search": False,
+        "expected_collected_volume": None,
     }
 
     # origcmloopit = cmloopit
@@ -1100,7 +1094,17 @@ def NZB_SEARCH(
     # results. '011' will return different than '11', as will '009' and '09'.
     while findloop < findcount:
         logger.fdebug("findloop: %s / findcount: %s" % (findloop, findcount))
-        comsrc = comsearch
+        volume_pack_query = False
+        expected_collected_volume = None
+        if findloop < len(comsearch_bases):
+            comsrc = comsearch_bases[findloop]
+        else:
+            comsrc = comsearch
+            full_query = collected_volume_searches[findloop - len(comsearch_bases)]
+            volume_pack_query = True
+            vol_match = re.search(r"(?:%20vol%20|%20v)(\d{1,3})$", full_query)
+            if vol_match:
+                expected_collected_volume = int(vol_match.group(1))
         if any([nzbprov == "Public Torrents", "DDL" in nzbprov, nzbprov == "experimental"]):
             # DDL iteration is handled in it's own module as is experimental.
             findloop = 99
@@ -1114,7 +1118,10 @@ def NZB_SEARCH(
         if IssueNumber is not None:
             # if seperatealpha == "yes":
             #     isssearch = str(c_number) + "%20" + str(c_alpha)
-            if cmloopit == 3:
+            if volume_pack_query:
+                comsearch = full_query
+                issdig = ""
+            elif cmloopit == 3:
                 comsearch = comsrc + "%2000" + str(isssearch)
                 issdig = "00"
             elif cmloopit == 2:
@@ -1133,7 +1140,10 @@ def NZB_SEARCH(
                 is_info["foundc"]["status"] = False
                 done = True
                 break
-            mod_isssearch = str(issdig) + str(isssearch)
+            if volume_pack_query:
+                mod_isssearch = ""
+            else:
+                mod_isssearch = str(issdig) + str(isssearch)
         else:
             if cmloopit == 4:
                 if any([booktype == "TPB", booktype == "HC", booktype == "GN"]):
@@ -1142,6 +1152,9 @@ def NZB_SEARCH(
             else:
                 comsearch = StoreDate
                 mod_isssearch = StoreDate
+
+        is_info["volume_pack_search"] = volume_pack_query
+        is_info["expected_collected_volume"] = expected_collected_volume
 
         # is_info = {'ComicName': ComicName,
         #           'nzbprov': nzbprov,
@@ -1286,12 +1299,6 @@ def NZB_SEARCH(
                     findurl = findurl + "&apikey=" + str(apikey)
                     logsearch = helpers.apiremove(str(findurl), "nzb")
 
-                    # IF USENET_RETENTION is set, honour it
-                    # For newznab sites, that means appending "&maxage=<whatever>"
-                    # on the URL
-                    if comicarr.CONFIG.USENET_RETENTION is not None and provider_stat["type"] != "torznab":
-                        findurl = findurl + "&maxage=" + str(comicarr.CONFIG.USENET_RETENTION)
-
                     pause_the_search = check_the_search_delay(manual)
 
                     # bypass for local newznabs
@@ -1305,6 +1312,17 @@ def NZB_SEARCH(
                         ):
                             logger.fdebug("local domain bypass for %s is active." % name_newznab)
                             localbypass = True
+
+                    # IF USENET_RETENTION is set, honour it for direct remote
+                    # indexers. For local Prowlarr/Hydra aggregators, avoid
+                    # forcing maxage because it hides old back-issues and
+                    # volume releases that the indexer can otherwise return.
+                    if (
+                        comicarr.CONFIG.USENET_RETENTION is not None
+                        and provider_stat["type"] != "torznab"
+                        and localbypass is False
+                    ):
+                        findurl = findurl + "&maxage=" + str(comicarr.CONFIG.USENET_RETENTION)
 
                     # Add a user-agent
                     headers = {"User-Agent": str(comicarr.USER_AGENT)}
@@ -1479,6 +1497,9 @@ def NZB_SEARCH(
 
         if verified_matches != "no results":
             verification(verified_matches, is_info)
+            if is_info["foundc"]["status"] is True:
+                done = True
+                break
 
         logger.fdebug("booktype:%s / chktpb: %s / findloop: %s" % (is_info["booktype"], is_info["chktpb"], findloop))
         if (
@@ -4199,16 +4220,20 @@ def generate_id(nzbprov, link, comicname):
             nzbid = re.sub(".torrent", "", nzbtempid).rstrip()
     elif "newznab" in nzbprov:
         # if in format of http://newznab/getnzb/<id>.nzb&i=1&r=apikey
-        tmpid = urlparse(link)[4]  # param 4 is the query string from the url.
+        parsed_link = urlparse(link)
+        tmpid = parsed_link[4]  # param 4 is the query string from the url.
         if "searchresultid" in tmpid:
             nzbid = os.path.splitext(link)[0].rsplit("searchresultid=", 1)[1]
         elif tmpid == "" or tmpid is None:
             nzbid = os.path.splitext(link)[0].rsplit("/", 1)[1]
         else:
-            nzbinfo = urllib.parse.parse_qs(link)
-            nzbid = nzbinfo.get("id", None)
-            if nzbid is not None:
-                nzbid = "".join(nzbid)
+            nzbinfo = urllib.parse.parse_qs(tmpid)
+            nzbid = None
+            for id_key in ("id", "guid", "link", "file"):
+                nzb_values = nzbinfo.get(id_key)
+                if nzb_values:
+                    nzbid = "".join(nzb_values).strip()
+                    break
         if nzbid is None:
             # if apikey is passed in as a parameter and the id is in the path
             findend = tmpid.find("&")
@@ -4219,7 +4244,7 @@ def generate_id(nzbprov, link, comicname):
                 findend = tmpid.find("apikey=", findend)
                 nzbid = tmpid[findend + 1 :].strip()
             if "&id" not in tmpid or nzbid == "":
-                tmpid = urlparse(link)[2]
+                tmpid = parsed_link[2]
                 nzbid = tmpid.rsplit("/", 1)[1]
     elif nzbprov == "torznab":
         idtmp = urlparse(link)[4]
@@ -4468,6 +4493,108 @@ def searchforissue_checker(issueid, storedate, issuedate, digitaldate, info):
         return {"status": True, "reason": None}
     else:
         return {"status": False, "reason": "invalid issueid"}
+
+
+def _encode_provider_query(value, strip_leading_articles=False):
+    """Normalize a series name into Comicarr's legacy provider query format."""
+    if not value:
+        return ""
+
+    query = re.sub(r"[\/\-]", " ", str(value))
+    query = re.sub(r"\band\b", "", query, flags=re.IGNORECASE)
+    if strip_leading_articles:
+        query = re.sub(r"\bthe\b", "", query, flags=re.IGNORECASE)
+    query = re.sub(r"[\&\:\?\,]", "", query)
+    query = re.sub(r"\s+", " ", query).strip().lower()
+    query = re.sub(" ", "%20", query)
+    query = re.sub("'", "%27", query)
+    return query
+
+
+def _build_comic_search_bases(series_name, comic_version=None, issue_number=None, booktype=None):
+    """Build base query variants for non-manga comic provider searches.
+
+    The legacy search removed "the" from all titles. That is useful as a
+    fallback, but some indexers only surface older series when the original
+    title and volume marker are included, e.g. "The Ultimates vol 1 06".
+    """
+    bases = []
+
+    def add_base(value):
+        if value and value not in bases:
+            bases.append(value)
+
+    exact = _encode_provider_query(series_name, strip_leading_articles=False)
+    article_stripped = _encode_provider_query(series_name, strip_leading_articles=True)
+    add_base(exact)
+    add_base(article_stripped)
+
+    if issue_number is not None and not _is_manga_search(None, booktype):
+        version = str(comic_version or "").strip()
+        version_digits = re.sub(r"[^0-9]", "", version)
+        if not version_digits and version.lower() in ("", "none", "v1"):
+            version_digits = "1"
+        if version_digits:
+            for base in list(bases):
+                add_base("%s%%20vol%%20%s" % (base, version_digits))
+                add_base("%s%%20v%s" % (base, version_digits))
+
+    return bases
+
+
+def _collected_volume_candidates(issue_number):
+    """Return likely collected-edition volume numbers for a single issue.
+
+    Monthly comics are commonly collected in 4-6 issue volumes. This is a
+    fallback only; exact issue searches still run first.
+    """
+    try:
+        issue_num = int(float(str(issue_number).strip()))
+    except (TypeError, ValueError):
+        return []
+
+    if issue_num <= 0:
+        return []
+
+    candidates = []
+
+    def add(value):
+        if value > 0 and value not in candidates:
+            candidates.append(value)
+
+    for issues_per_volume in (5, 6, 4):
+        add((issue_num + issues_per_volume - 1) // issues_per_volume)
+
+    return candidates
+
+
+def _build_collected_volume_searches(series_name, issue_number, booktype=None):
+    """Build full-query fallbacks for TPB/collected-volume releases."""
+    if issue_number is None or _is_manga_search(None, booktype):
+        return []
+
+    searches = []
+    bases = []
+
+    def add_base(value):
+        if value and value not in bases:
+            bases.append(value)
+
+    add_base(_encode_provider_query(series_name, strip_leading_articles=False))
+    add_base(_encode_provider_query(series_name, strip_leading_articles=True))
+
+    def add_query(value):
+        if value and value not in searches:
+            searches.append(value)
+
+    for volume_num in _collected_volume_candidates(issue_number):
+        for base in bases:
+            add_query("%s%%20vol%%20%02d" % (base, volume_num))
+            add_query("%s%%20vol%%20%d" % (base, volume_num))
+            add_query("%s%%20v%02d" % (base, volume_num))
+            add_query("%s%%20v%d" % (base, volume_num))
+
+    return searches
 
 
 def _build_manga_search_terms(series_name, chapter_num, volume_num):

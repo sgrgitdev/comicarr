@@ -142,6 +142,22 @@ def test_priority_search_job_goes_to_front_of_queue(durable_search_db):
     assert comicarr.SEARCH_QUEUE.get_nowait()["issueid"] == "bulk-1"
 
 
+def test_selected_issue_search_goes_to_front_of_queue(durable_search_db):
+    _insert_wanted_manga(durable_search_db)
+    jobs.start_search_job(
+        [{"issueid": "bulk-1", "comicid": "comic-1", "comicname": "Bulk Comic", "issuenumber": "1"}],
+        kind="bulk",
+        source="test",
+        title="Bulk",
+    )
+
+    result = jobs.start_issue_search_job(["chapter-1"])
+
+    assert result["success"] is True
+    assert comicarr.SEARCH_QUEUE.get_nowait()["issueid"] == "chapter-1"
+    assert comicarr.SEARCH_QUEUE.get_nowait()["issueid"] == "bulk-1"
+
+
 def test_manga_volume_chapters_are_grouped_into_one_volume_search(durable_search_db):
     _insert_wanted_manga_volume(durable_search_db)
 

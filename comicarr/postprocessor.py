@@ -27,6 +27,7 @@ import shutil
 import subprocess
 import sys
 import time
+import zipfile
 
 from sqlalchemy import Integer, and_, delete, func, inspect, or_, select
 
@@ -80,8 +81,10 @@ class PostProcessor(object):
         if queue:
             self.queue = queue
 
+        self.in_progress = False
         if comicarr.APILOCK.locked():
-            return {"status": "IN PROGRESS"}
+            self.in_progress = True
+            return
 
         if apicall is True:
             self.apicall = True
@@ -117,6 +120,135 @@ class PostProcessor(object):
             self.comicid = None
 
         self.issuearcid = None
+
+    def _safe_archive_stem(self, value):
+        stem = re.sub(r'[<>:"/\\|?*\x00-\x1f]+', " ", str(value))
+        stem = re.sub(r"\s+", " ", stem).strip()
+        return stem.rstrip(".")
+
+    def _direct_issue_archive_stem(self):
+        if self.issueid is None:
+            return None
+
+        try:
+            stmt = (
+                select(comics.c.ComicName, issues.c.Issue_Number, issues.c.ReleaseDate, issues.c.IssueDate)
+                .select_from(issues.join(comics, issues.c.ComicID == comics.c.ComicID))
+                .where(issues.c.IssueID == str(self.issueid))
+            )
+            issue_row = db.select_one(stmt)
+        except Exception as exc:
+            logger.fdebug("%s Unable to derive issue filename from database: %s" % (self.module, exc))
+            return None
+
+        if not issue_row:
+            return None
+
+        series_name = issue_row["ComicName"]
+        issue_number = issue_row["Issue_Number"]
+        issue_date = issue_row["ReleaseDate"] or issue_row["IssueDate"]
+        issue_year = None
+        if issue_date and len(str(issue_date)) >= 4:
+            issue_year = str(issue_date)[:4]
+
+        if not series_name or issue_number is None:
+            return None
+
+        stem = "%s %s" % (series_name, issue_number)
+        if issue_year:
+            stem = "%s (%s)" % (stem, issue_year)
+        return self._safe_archive_stem(stem)
+
+    def _derived_archive_name(self, archive_path, target_ext):
+        archive_dir = os.path.dirname(archive_path)
+        archive_stem = os.path.splitext(os.path.basename(archive_path))[0]
+        parent_stem = os.path.basename(archive_dir.rstrip(os.sep))
+        root_stem = os.path.basename(str(self.nzb_folder).rstrip(os.sep))
+
+        direct_stem = self._direct_issue_archive_stem()
+        if direct_stem:
+            stem = direct_stem
+        elif parent_stem and parent_stem != root_stem:
+            stem = parent_stem
+        elif self.nzb_name and self.nzb_name != "Manual Run":
+            stem = self.nzb_name
+        else:
+            stem = archive_stem
+
+        return os.path.join(archive_dir, "%s%s" % (self._safe_archive_stem(stem), target_ext))
+
+    def _zip_contains_comic_pages(self, archive_path):
+        image_ext = (".jpg", ".jpeg", ".png", ".webp", ".gif", ".avif")
+        try:
+            with zipfile.ZipFile(archive_path, "r") as wrapper:
+                return any(name.lower().endswith(image_ext) for name in wrapper.namelist())
+        except (OSError, zipfile.BadZipFile):
+            return False
+
+    def _materialize_comic_archive_from_zip(self, archive_path):
+        if not zipfile.is_zipfile(archive_path):
+            return None
+
+        nested_archive_exts = {
+            ".rar": ".cbr",
+            ".cbr": ".cbr",
+            ".cbz": ".cbz",
+            ".cb7": ".cb7",
+            ".pdf": ".pdf",
+        }
+        try:
+            with zipfile.ZipFile(archive_path, "r") as wrapper:
+                candidates = [
+                    member
+                    for member in wrapper.infolist()
+                    if not member.is_dir()
+                    and os.path.splitext(os.path.basename(member.filename))[1].lower() in nested_archive_exts
+                ]
+                if candidates:
+                    candidates.sort(key=lambda member: member.file_size, reverse=True)
+                    member = candidates[0]
+                    source_ext = os.path.splitext(os.path.basename(member.filename))[1].lower()
+                    target_path = self._derived_archive_name(archive_path, nested_archive_exts[source_ext])
+                    if not os.path.exists(target_path):
+                        with wrapper.open(member, "r") as source, open(target_path, "wb") as target:
+                            shutil.copyfileobj(source, target)
+                    return target_path
+        except (OSError, zipfile.BadZipFile) as exc:
+            logger.warn("%s Unable to inspect zip wrapper %s: %s" % (self.module, archive_path, exc))
+            return None
+
+        if self._zip_contains_comic_pages(archive_path):
+            target_path = self._derived_archive_name(archive_path, ".cbz")
+            if not os.path.exists(target_path):
+                shutil.copy2(archive_path, target_path)
+            return target_path
+
+        return None
+
+    def _prepare_wrapped_archives(self):
+        if not os.path.isdir(self.nzb_folder):
+            return []
+
+        prepared = []
+        for dirname, _subdirs, filenames in os.walk(self.nzb_folder):
+            for filename in filenames:
+                if not filename.lower().endswith(".zip"):
+                    continue
+                archive_path = os.path.join(dirname, filename)
+                prepared_path = self._materialize_comic_archive_from_zip(archive_path)
+                if prepared_path:
+                    prepared.append(prepared_path)
+
+        if prepared:
+            logger.info(
+                "%s Prepared %s wrapped archive(s) for post-processing: %s"
+                % (self.module, len(prepared), ", ".join(os.path.basename(path) for path in prepared))
+            )
+            self._log(
+                "Prepared %s wrapped archive(s) for post-processing: %s"
+                % (len(prepared), ", ".join(os.path.basename(path) for path in prepared))
+            )
+        return prepared
 
     def _log(self, message, level=logger):  # .message):  #level=logger.MESSAGE):
         """
@@ -602,6 +734,7 @@ class PostProcessor(object):
                     logger.fdebug("%s Manual Run initiated" % module)
                 # Manual postprocessing on a folder.
                 # first we get a parsed results list  of the files being processed, and then poll against the sql to get a short list of hits.
+                self._prepare_wrapped_archives()
                 flc = filechecker.FileChecker(self.nzb_folder, justparse=True, pp_mode=True)
                 filelist = flc.listFiles()
                 if filelist["comiccount"] == 0:  # is None:
@@ -638,6 +771,7 @@ class PostProcessor(object):
                         filelist["comiclist"] = [fl]
                         filelist["comiccount"] = len(filelist["comiclist"])
                     else:
+                        self._prepare_wrapped_archives()
                         flc = filechecker.FileChecker(self.nzb_folder, justparse=True, pp_mode=True)
                         filelist = flc.listFiles()
                 else:
@@ -1312,13 +1446,27 @@ class PostProcessor(object):
 
                 nm = 0
                 for cs in watchvals:
+                    match_fl = fl
+                    if fl.get("alt_series"):
+                        alt_dynamic_info = filechecker.FileChecker(watchcomic=fl["alt_series"]).dynamic_replace(
+                            fl["alt_series"]
+                        )
+                        alt_dynamic_name = re.sub(
+                            r"[\|\s]", "", alt_dynamic_info["mod_seriesname"].lower()
+                        ).strip()
+                        if alt_dynamic_name == cs["DynamicName"]:
+                            match_fl = dict(fl)
+                            match_fl["series_name"] = fl["alt_series"]
+                            match_fl["series_name_decoded"] = fl["alt_series"]
+                            match_fl["dynamic_name"] = alt_dynamic_info["mod_seriesname"]
+
                     wm = filechecker.FileChecker(
                         watchcomic=cs["ComicName"],
                         Publisher=cs["ComicPublisher"],
                         AlternateSearch=cs["AlternateSearch"],
                         manual=cs["WatchValues"],
                     )
-                    watchmatch = wm.matchIT(fl)
+                    watchmatch = wm.matchIT(match_fl)
                     if watchmatch["process_status"] == "fail":
                         nm += 1
                         continue
