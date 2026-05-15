@@ -28,6 +28,7 @@ export default function SeriesDetailPage() {
   const navigate = useNavigate();
   const [showDeleteConfirm, setShowDeleteConfirm] = useState(false);
   const [isQueueingMissing, setIsQueueingMissing] = useState(false);
+  const [isSearchingWanted, setIsSearchingWanted] = useState(false);
   const [filter, setFilter] = useState<IssueFilter>("all");
   const queryClient = useQueryClient();
   const { addToast } = useToast();
@@ -108,6 +109,7 @@ export default function SeriesDetailPage() {
     (i) => getStatus(i) !== "Downloaded",
   ).length;
   const skippedCount = issues.filter((i) => getStatus(i) === "Skipped").length;
+  const wantedCount = issues.filter((i) => getStatus(i) === "Wanted").length;
   const monitoredCount = issues.filter(
     (i) => getStatus(i) !== "Skipped",
   ).length;
@@ -149,6 +151,39 @@ export default function SeriesDetailPage() {
       });
     } finally {
       setIsQueueingMissing(false);
+    }
+  };
+
+  const handleSearchWanted = async () => {
+    if (!comicId) return;
+    setIsSearchingWanted(true);
+    try {
+      const result = await apiRequest<{
+        selected?: number;
+        search?: { job_id?: number; total_items?: number; message?: string };
+      }>("POST", `/api/series/${comicId}/search-wanted`, {});
+
+      const total = result.search?.total_items ?? result.selected ?? 0;
+      addToast({
+        type: "success",
+        title: "Search started",
+        description:
+          total > 0
+            ? `Queued ${total} ${isManga ? "chapters" : "issues"} for search.`
+            : "No wanted items to search.",
+      });
+      await queryClient.invalidateQueries({ queryKey: ["searchQueue"] });
+      await queryClient.invalidateQueries({ queryKey: ["wanted"] });
+    } catch (err) {
+      addToast({
+        type: "error",
+        title: "Search failed",
+        description: `Failed to start search: ${
+          err instanceof Error ? err.message : "Unknown error"
+        }`,
+      });
+    } finally {
+      setIsSearchingWanted(false);
     }
   };
 
@@ -313,6 +348,23 @@ export default function SeriesDetailPage() {
             >
               <Search className="w-3.5 h-3.5" />
               {isQueueingMissing ? "Marking..." : "Mark missing wanted"}
+            </button>
+            <button
+              type="button"
+              onClick={handleSearchWanted}
+              disabled={isSearchingWanted || wantedCount === 0}
+              title={
+                wantedCount === 0
+                  ? "No wanted issues to search"
+                  : "Search wanted issues in this series"
+              }
+              className={ghostBtn}
+              style={{ borderColor: "var(--border)" }}
+            >
+              <Search
+                className={`w-3.5 h-3.5 ${isSearchingWanted ? "animate-pulse" : ""}`}
+              />
+              {isSearchingWanted ? "Searching..." : "Search wanted"}
             </button>
             <button
               type="button"

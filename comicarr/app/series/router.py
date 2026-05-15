@@ -252,6 +252,24 @@ def queue_missing_series(
         return JSONResponse(status_code=422, content={"detail": "limit must be a number"})
 
 
+@router.post("/series/{comic_id}/search-wanted", dependencies=[Depends(require_session)])
+def search_wanted_series(
+    comic_id: str,
+    request_body: dict = None,
+    ctx: AppContext = Depends(get_context),
+):
+    """Search wanted issues in a single series."""
+    if request_body is None:
+        request_body = {}
+
+    limit = request_body.get("limit")
+
+    try:
+        return series_service.search_wanted_for_series(ctx, comic_id, limit=limit)
+    except ValueError:
+        return JSONResponse(status_code=422, content={"detail": "limit must be a number"})
+
+
 @router.get("/wanted", dependencies=[Depends(require_session)])
 def get_wanted(
     limit: int = Query(None),
