@@ -3,8 +3,10 @@ import { useSearchParams, Link } from "react-router-dom";
 import {
   useDownloadHistory,
   useDownloadQueue,
+  useSearchQueue,
   type HistoryItem,
   type QueueItem,
+  type SearchQueueItem,
 } from "@/hooks/useActivity";
 import { Skeleton } from "@/components/ui/skeleton";
 import ErrorDisplay from "@/components/ui/ErrorDisplay";
@@ -19,6 +21,7 @@ function StatusPill({ status }: { status: string }) {
   if (
     s.includes("down") ||
     s.includes("snatch") ||
+    s.includes("search") ||
     s === "active" ||
     s === "completed" ||
     s === "done"
@@ -115,9 +118,23 @@ function DenseTable({
 }
 
 function QueueView() {
-  const { data: queue, isLoading, error, refetch } = useDownloadQueue();
+  const {
+    data: downloadQueue,
+    isLoading: downloadsLoading,
+    error: downloadsError,
+    refetch: refetchDownloads,
+  } = useDownloadQueue();
+  const {
+    data: searchQueue,
+    isLoading: searchLoading,
+    error: searchError,
+    refetch: refetchSearch,
+  } = useSearchQueue();
+  const queue = downloadQueue || [];
+  const searchItems = searchQueue?.items || [];
+  const activeSearch = searchQueue?.active || null;
 
-  if (isLoading) {
+  if (downloadsLoading || searchLoading) {
     return (
       <div className="space-y-2">
         {[0, 1, 2].map((i) => (
@@ -127,23 +144,26 @@ function QueueView() {
     );
   }
 
-  if (error) {
+  if (downloadsError || searchError) {
     return (
       <ErrorDisplay
-        error={error}
-        title="Unable to load download queue"
-        onRetry={() => refetch()}
+        error={downloadsError || searchError}
+        title="Unable to load queue"
+        onRetry={() => {
+          refetchDownloads();
+          refetchSearch();
+        }}
       />
     );
   }
 
-  if (!queue || queue.length === 0) {
+  if (queue.length === 0 && searchItems.length === 0 && !activeSearch) {
     return (
       <EmptyState
         variant="custom"
         eyebrow="QUEUE · EMPTY"
-        title="No active downloads"
-        description="Downloads will appear here while items are being processed."
+        title="No active search or downloads"
+        description="Searches and downloads will appear here while items are being processed."
       />
     );
   }
@@ -151,10 +171,107 @@ function QueueView() {
   const gridTpl = "1.5fr 2fr 100px 110px 110px";
 
   return (
-    <DenseTable
-      headers={["series", "file", "site", "status", "updated"]}
-      gridTemplate={gridTpl}
-    >
+      <DenseTable
+        headers={["series", "file", "site", "status", "updated"]}
+        gridTemplate={gridTpl}
+      >
+      {activeSearch && (
+        <div
+          key={`search-active-${activeSearch.issueid}`}
+          className="grid items-center px-4 py-2 text-[12px] border-b last:border-b-0"
+          style={{
+            borderColor: "var(--border-soft, var(--border))",
+            gridTemplateColumns: gridTpl,
+          }}
+        >
+          <div className="font-medium truncate">
+            {activeSearch.comicid ? (
+              <Link
+                to={`/library/${activeSearch.comicid}`}
+                className="hover:text-[var(--primary)]"
+              >
+                {activeSearch.comicname}
+                {activeSearch.seriesyear && (
+                  <span className="text-muted-foreground">
+                    {" "}
+                    ({activeSearch.seriesyear})
+                  </span>
+                )}
+              </Link>
+            ) : (
+              <>
+                {activeSearch.comicname}
+                {activeSearch.seriesyear && (
+                  <span className="text-muted-foreground">
+                    {" "}
+                    ({activeSearch.seriesyear})
+                  </span>
+                )}
+              </>
+            )}
+          </div>
+          <div className="font-mono text-[11px] text-muted-foreground truncate">
+            {activeSearch.issuenumber ? `#${activeSearch.issuenumber}` : "—"}
+            {activeSearch.booktype ? ` · ${activeSearch.booktype}` : ""}
+          </div>
+          <div className="text-muted-foreground truncate">search</div>
+          <StatusPill status="searching" />
+          <div className="font-mono text-[11px] text-muted-foreground">
+            {searchQueue?.active_seconds != null
+              ? `${searchQueue.active_seconds}s`
+              : "active"}
+          </div>
+        </div>
+      )}
+      {searchItems.map((item: SearchQueueItem) => (
+        <div
+          key={`search-${item.issueid}-${item.position}`}
+          className="grid items-center px-4 py-2 text-[12px] border-b last:border-b-0"
+          style={{
+            borderColor: "var(--border-soft, var(--border))",
+            gridTemplateColumns: gridTpl,
+          }}
+        >
+          <div className="font-medium truncate">
+            {item.comicid ? (
+              <Link
+                to={`/library/${item.comicid}`}
+                className="hover:text-[var(--primary)]"
+              >
+                {item.comicname}
+                {item.seriesyear && (
+                  <span className="text-muted-foreground">
+                    {" "}
+                    ({item.seriesyear})
+                  </span>
+                )}
+              </Link>
+            ) : (
+              <>
+                {item.comicname}
+                {item.seriesyear && (
+                  <span className="text-muted-foreground">
+                    {" "}
+                    ({item.seriesyear})
+                  </span>
+                )}
+              </>
+            )}
+          </div>
+          <div className="font-mono text-[11px] text-muted-foreground truncate">
+            {item.issuenumber ? `#${item.issuenumber}` : "—"}
+            {item.booktype ? ` · ${item.booktype}` : ""}
+          </div>
+          <div className="text-muted-foreground truncate">search</div>
+          <StatusPill status="queued" />
+          <div className="font-mono text-[11px] text-muted-foreground">
+            #{item.position}
+            {searchQueue?.size && searchQueue.size > searchItems.length
+              ? `/${searchQueue.size}`
+              : ""}
+          </div>
+        </div>
+      ))}
       {queue.map((item: QueueItem) => (
         <div
           key={item.ID}

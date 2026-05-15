@@ -251,6 +251,12 @@ def search_init(
         logger.fdebug("Story-ARC: %s" % SARC)
         logger.fdebug("IssueArcID: %s" % IssueArcID)
 
+    if _is_manga_search(content_type, booktype):
+        content_type = "manga"
+        booktype = "manga"
+        if chapter_number is None:
+            chapter_number = IssueNumber
+
     # --- Manga content-type branch ---
     # When searching for manga chapters, construct manga-specific query terms
     # and inject them as AlternateSearch patterns. The rest of the search pipeline
@@ -927,7 +933,7 @@ def NZB_SEARCH(
         allow_packs = True
     else:
         allow_packs = False
-    newznab_local = False
+    newznab_local = None
     untouched_name = None
     provider_stat = nzbprov
     # logger.fdebug('provider_stat_before: %s' % (provider_stat))
@@ -1062,6 +1068,7 @@ def NZB_SEARCH(
         "IssueDate": IssueDate,
         "digitaldate": digitaldate,
         "booktype": booktype,
+        "content_type": "manga" if _is_manga_search(None, booktype) else None,
         "ignore_booktype": ignore_booktype,
         "SeriesYear": SeriesYear,
         "ComicVersion": ComicVersion,
@@ -1291,24 +1298,10 @@ def NZB_SEARCH(
                     # remove the protocol string (http/https)
                     localbypass = False
                     if provider_stat["type"] == "newznab":
-                        if host_newznab_fix.startswith("http"):
-                            hnc = host_newznab_fix.replace("http://", "")
-                        elif host_newznab_fix.startswith("https"):
-                            hnc = host_newznab_fix.replace("https://", "")
-                        else:
-                            hnc = host_newznab_fix
-
                         if (
-                            any(
-                                [
-                                    hnc[:3] == "10.",
-                                    hnc[:4] == "172.",
-                                    hnc[:4] == "192.",
-                                    hnc.startswith("localhost"),
-                                    newznab_local is True,
-                                ]
-                            )
-                            and newznab_local is not False
+                            newznab_local is True
+                            or _is_local_indexer_host(host_newznab_fix)
+                            or _is_local_indexer_host(host_newznab)
                         ):
                             logger.fdebug("local domain bypass for %s is active." % name_newznab)
                             localbypass = True
@@ -1733,6 +1726,84 @@ def verification(verified_matches, is_info):
     return is_info  # foundc
 
 
+def _wanted_result_sort_key(result):
+    """Sort wanted results by the best available date without crashing on NULLs."""
+    for key in ("StoreDate", "IssueDate", "DigitalDate", "DateAdded"):
+        value = result.get(key)
+        if value and value != "0000-00-00":
+            return str(value)
+    return ""
+
+
+def _row_get(row, key, default=None):
+    try:
+        return row[key]
+    except Exception:
+        try:
+            return row.get(key, default)
+        except Exception:
+            return default
+
+
+def _is_blank_date(value):
+    return value is None or str(value).strip() in ("", "None", "0000-00-00")
+
+
+def _best_issue_year(storedate, issuedate, seriesyear):
+    for candidate in (storedate, issuedate, seriesyear):
+        if not _is_blank_date(candidate):
+            return str(candidate)[:4]
+    return str(datetime.datetime.now().year)
+
+
+def _is_manga_search(content_type=None, booktype=None):
+    return str(content_type or "").lower() == "manga" or str(booktype or "").lower() == "manga"
+
+
+def _is_local_indexer_host(host):
+    if not host:
+        return False
+    try:
+        parsed = urlparse(host if "://" in str(host) else "//%s" % host)
+        hostname = (parsed.hostname or str(host)).lower()
+    except Exception:
+        hostname = str(host).lower()
+    return (
+        hostname in ("localhost", "127.0.0.1", "::1", "host.docker.internal")
+        or hostname.startswith("10.")
+        or hostname.startswith("192.168.")
+        or any(hostname.startswith("172.%s." % idx) for idx in range(16, 32))
+    )
+
+
+def _search_queue_contains(issueid):
+    if issueid is None:
+        return False
+    issueid = str(issueid)
+    try:
+        with comicarr.SEARCH_QUEUE.mutex:
+            if any(isinstance(item, dict) and str(item.get("issueid")) == issueid for item in comicarr.SEARCH_QUEUE.queue):
+                return True
+    except Exception:
+        return False
+
+    status = getattr(comicarr, "SEARCH_QUEUE_STATUS", None)
+    if isinstance(status, dict):
+        active = status.get("active")
+        if isinstance(active, dict) and str(active.get("issueid")) == issueid:
+            return True
+    return False
+
+
+def _enqueue_search_item(item):
+    issueid = item.get("issueid") if isinstance(item, dict) else None
+    if _search_queue_contains(issueid):
+        logger.fdebug("[SEARCH-QUEUE] Issue %s is already queued or active; skipping duplicate" % issueid)
+        return False
+    comicarr.SEARCH_QUEUE.put(item)
+    return True
+
+
 def searchforissue(issueid=None, new=False, rsschecker=None, manual=False):
     if rsschecker == "yes":
         while comicarr.SEARCHLOCK.locked():
@@ -1833,6 +1904,8 @@ def searchforissue(issueid=None, new=False, rsschecker=None, manual=False):
                                         "mode": "want",
                                         "DateAdded": iss["DateAdded"],
                                         "ComicName": iss["ComicName"],
+                                        "ChapterNumber": _row_get(iss, "ChapterNumber"),
+                                        "VolumeNumber": _row_get(iss, "VolumeNumber"),
                                     }
                                 )
                         else:
@@ -1974,7 +2047,7 @@ def searchforissue(issueid=None, new=False, rsschecker=None, manual=False):
                     " Date-data in the database: %s" % (search_skip)
                 )
 
-            for result in sorted(results, key=itemgetter("StoreDate"), reverse=True):
+            for result in sorted(results, key=_wanted_result_sort_key, reverse=True):
                 try:
                     OneOff = False
                     storyarc_watchlist = False
@@ -2107,16 +2180,21 @@ def searchforissue(issueid=None, new=False, rsschecker=None, manual=False):
                                 result["IssueID"],
                                 DateAdded,
                                 comicarr.SEARCH_TIER_DATE,
+                                )
                             )
-                        )
-                        comicarr.SEARCH_QUEUE.put(
+                        content_type = _row_get(comic, "ContentType", "comic")
+                        queue_booktype = "manga" if _is_manga_search(content_type, booktype) else booktype
+                        _enqueue_search_item(
                             {
                                 "comicname": comicname,
                                 "seriesyear": SeriesYear,
                                 "issuenumber": result["Issue_Number"],
                                 "issueid": result["IssueID"],
                                 "comicid": result["ComicID"],
-                                "booktype": booktype,
+                                "booktype": queue_booktype,
+                                "content_type": content_type,
+                                "chapter_number": result.get("ChapterNumber"),
+                                "volume_number": result.get("VolumeNumber"),
                             }
                         )
                         continue
@@ -2548,6 +2626,9 @@ def searchforissue(issueid=None, new=False, rsschecker=None, manual=False):
 
                 allow_packs = False
                 ComicID = result["ComicID"]
+                content_type = None
+                chapter_number = _row_get(result, "ChapterNumber")
+                volume_number = _row_get(result, "VolumeNumber")
                 if smode == "story_arc":
                     ComicName = result["ComicName"]
                     Comicname_filesafe = helpers.filesafe(ComicName)
@@ -2586,6 +2667,7 @@ def searchforissue(issueid=None, new=False, rsschecker=None, manual=False):
                     ignore_booktype = False
                 else:
                     comic = db.select_one(select(comics).where(comics.c.ComicID == ComicID))
+                    content_type = _row_get(comic, "ContentType", "comic")
                     if smode == "want_ann":
                         ComicName = result["ReleaseComicName"]
                         Comicname_filesafe = None
@@ -2613,20 +2695,13 @@ def searchforissue(issueid=None, new=False, rsschecker=None, manual=False):
                     if any([comic["AllowPacks"] == 1, comic["AllowPacks"] == "1"]):
                         allow_packs = True
 
-                if all([IssueDate == "0000-00-00", StoreDate == "0000-00-00"]):
-                    IssueYear = SeriesYear
-                else:
-                    if StoreDate == "0000-00-00":
-                        if IssueDate != "0000-00-00":
-                            IssueYear = str(IssueDate)[:4]
-                        else:
-                            logger.fdebug(
-                                "No valid date found for %s issue %s - defaulting to series year."
-                                "You may want to edit the date to correct this." % (ComicName, IssueNumber)
-                            )
-                            IssueYear = SeriesYear
-                    else:
-                        IssueYear = str(StoreDate)[:4]
+                if _is_manga_search(content_type, booktype):
+                    content_type = "manga"
+                    booktype = "manga"
+                    if chapter_number is None:
+                        chapter_number = IssueNumber
+
+                IssueYear = _best_issue_year(StoreDate, IssueDate, SeriesYear)
 
                 foundNZB, prov = search_init(
                     ComicName,
@@ -2653,6 +2728,9 @@ def searchforissue(issueid=None, new=False, rsschecker=None, manual=False):
                     digitaldate=DigitalDate,
                     booktype=booktype,
                     ignore_booktype=ignore_booktype,
+                    content_type=content_type,
+                    chapter_number=chapter_number,
+                    volume_number=volume_number,
                 )
                 if manual is True:
                     comicarr.SEARCHLOCK.release()
@@ -2775,19 +2853,26 @@ def searchIssueIDList(issuelist):
                 comicname = comic["ComicName"]
                 seriesyear = comic["ComicYear"]
                 booktype = comic["Type"]
+                content_type = _row_get(comic, "ContentType", "comic")
                 issuenumber = issue["Issue_Number"]
 
                 if comic["Corrected_Type"] is not None and comic["Type"] != comic["Corrected_Type"]:
                     booktype = comic["Corrected_Type"]
+            else:
+                content_type = None
 
-            comicarr.SEARCH_QUEUE.put(
+            queue_booktype = "manga" if _is_manga_search(content_type, booktype) else booktype
+            _enqueue_search_item(
                 {
                     "comicname": comicname,
                     "seriesyear": seriesyear,
                     "issuenumber": issuenumber,
                     "issueid": issue["IssueID"],  # issueid,
                     "comicid": issue["ComicID"],
-                    "booktype": booktype,
+                    "booktype": queue_booktype,
+                    "content_type": content_type,
+                    "chapter_number": _row_get(issue, "ChapterNumber"),
+                    "volume_number": _row_get(issue, "VolumeNumber"),
                 }
             )
 
@@ -4404,12 +4489,26 @@ def _build_manga_search_terms(series_name, chapter_num, volume_num):
     if not series_name:
         return terms
 
+    def add_term(term):
+        term = re.sub(r"\s+", " ", str(term)).strip()
+        if term and term not in terms:
+            terms.append(term)
+
     # Normalize the series name — strip leading/trailing whitespace
     name = series_name.strip()
+    names = [name]
+    if ":" in name:
+        colonless = re.sub(r"\s*:\s*", " ", name).strip()
+        left, right = [part.strip() for part in name.split(":", 1)]
+        for candidate in (colonless, left, right):
+            if candidate and candidate not in names:
+                names.append(candidate)
 
     # Zero-pad chapter and volume for consistent matching
+    ch_raw = None
     ch_padded = None
     if chapter_num is not None:
+        ch_raw = str(chapter_num).strip()
         try:
             ch_float = float(chapter_num)
             if ch_float == int(ch_float):
@@ -4433,17 +4532,25 @@ def _build_manga_search_terms(series_name, chapter_num, volume_num):
     # Build variations in priority order (most specific first)
     if ch_padded and vol_padded:
         # Combined: "Series Name" v01c001
-        terms.append("%s v%sc%s" % (name, vol_padded, ch_padded))
+        add_term("%s v%sc%s" % (name, vol_padded, ch_padded))
 
     if ch_padded:
-        # Short chapter: "Series Name" c001
-        terms.append("%s c%s" % (name, ch_padded))
-        # Long chapter: "Series Name" chapter 001
-        terms.append("%s chapter %s" % (name, ch_padded))
+        for candidate_name in names:
+            # Bare chapter catches common "Series 244" releases.
+            add_term("%s %s" % (candidate_name, ch_raw or ch_padded))
+            # Short chapter: "Series Name" c001 / c244
+            add_term("%s c%s" % (candidate_name, ch_padded))
+            if ch_raw and ch_raw != ch_padded:
+                add_term("%s c%s" % (candidate_name, ch_raw))
+            # Long chapter: "Series Name" chapter 001 / chapter 244
+            add_term("%s chapter %s" % (candidate_name, ch_padded))
+            if ch_raw and ch_raw != ch_padded:
+                add_term("%s chapter %s" % (candidate_name, ch_raw))
 
     if vol_padded:
-        # Volume only: "Series Name" v01
-        terms.append("%s v%s" % (name, vol_padded))
+        for candidate_name in names:
+            # Volume only: "Series Name" v01
+            add_term("%s v%s" % (candidate_name, vol_padded))
 
     logger.fdebug(
         "[SEARCH-MANGA] Built %d search terms for %s (ch=%s, vol=%s)" % (len(terms), name, chapter_num, volume_num)

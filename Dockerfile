@@ -24,7 +24,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 COPY --from=backend-build /app /opt/comicarr
 COPY --from=frontend-build /app/frontend/dist /opt/comicarr/frontend/dist
 COPY docker/entrypoint.sh /entrypoint.sh
-RUN chmod +x /entrypoint.sh
+RUN sed -i 's/\r$//' /entrypoint.sh && chmod +x /entrypoint.sh
 ENV PATH="/opt/comicarr/.venv/bin:$PATH"
 EXPOSE 8090
 VOLUME ["/config", "/comics"]

@@ -1,4 +1,5 @@
 import { useState } from "react";
+import { useQueryClient } from "@tanstack/react-query";
 import { useParams, useNavigate, Link } from "react-router-dom";
 import {
   Pause,
@@ -15,6 +16,7 @@ import {
   useRefreshSeries,
   useDeleteSeries,
 } from "@/hooks/useSeries";
+import { apiRequest } from "@/lib/api";
 import { useToast } from "@/components/ui/toast";
 import { Skeleton } from "@/components/ui/skeleton";
 import type { ComicOrManga, Issue } from "@/types";
@@ -25,7 +27,9 @@ export default function SeriesDetailPage() {
   const { comicId } = useParams<{ comicId: string }>();
   const navigate = useNavigate();
   const [showDeleteConfirm, setShowDeleteConfirm] = useState(false);
+  const [isQueueingMissing, setIsQueueingMissing] = useState(false);
   const [filter, setFilter] = useState<IssueFilter>("all");
+  const queryClient = useQueryClient();
   const { addToast } = useToast();
 
   const { data: seriesData, isLoading, error } = useSeriesDetail(comicId);
@@ -103,6 +107,7 @@ export default function SeriesDetailPage() {
   const missingCount = issues.filter(
     (i) => getStatus(i) !== "Downloaded",
   ).length;
+  const skippedCount = issues.filter((i) => getStatus(i) === "Skipped").length;
   const monitoredCount = issues.filter(
     (i) => getStatus(i) !== "Skipped",
   ).length;
@@ -115,6 +120,37 @@ export default function SeriesDetailPage() {
         : filter === "monitored"
           ? issues.filter((i) => getStatus(i) !== "Skipped")
           : issues;
+
+  const handleQueueMissing = async () => {
+    if (!comicId) return;
+    setIsQueueingMissing(true);
+    try {
+      const result = await apiRequest<{ queued?: number; selected?: number }>(
+        "POST",
+        `/api/series/${comicId}/queue-missing`,
+        { search: false },
+      );
+      const count = result.queued ?? result.selected ?? 0;
+      addToast({
+        type: "success",
+        title: "Missing issues marked",
+        description: `${count} ${isManga ? "chapters" : "issues"} marked as wanted.`,
+      });
+      await queryClient.invalidateQueries({ queryKey: ["series", comicId] });
+      await queryClient.invalidateQueries({ queryKey: ["series"] });
+      await queryClient.invalidateQueries({ queryKey: ["wanted"] });
+    } catch (err) {
+      addToast({
+        type: "error",
+        title: "Error",
+        description: `Failed to mark missing issues: ${
+          err instanceof Error ? err.message : "Unknown error"
+        }`,
+      });
+    } finally {
+      setIsQueueingMissing(false);
+    }
+  };
 
   const handlePauseResume = async () => {
     if (!comicId) return;
@@ -262,8 +298,13 @@ export default function SeriesDetailPage() {
           <div className="flex items-center gap-2">
             <button
               type="button"
-              disabled
-              title="Bulk search is not yet wired up"
+              onClick={handleQueueMissing}
+              disabled={isQueueingMissing || skippedCount === 0}
+              title={
+                skippedCount === 0
+                  ? "No skipped issues to mark as wanted"
+                  : "Mark skipped issues as wanted"
+              }
               className="inline-flex items-center gap-1.5 px-3.5 py-1.5 rounded-[5px] text-[12px] font-semibold disabled:cursor-not-allowed disabled:opacity-60"
               style={{
                 background: "var(--primary)",
@@ -271,7 +312,7 @@ export default function SeriesDetailPage() {
               }}
             >
               <Search className="w-3.5 h-3.5" />
-              Search all missing
+              {isQueueingMissing ? "Marking..." : "Mark missing wanted"}
             </button>
             <button
               type="button"

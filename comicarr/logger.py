@@ -65,14 +65,16 @@ if not LOG_LANG.startswith("en"):
             if issubclass(exc_type, KeyboardInterrupt):
                 sys.__excepthook__(exc_type, exc_value, exc_traceback)
                 return
-            logger.exception("Uncaught Exception", excinfo=(exc_type, exc_value, exc_traceback))
-            sys.__excepthook__(exc_type, exc_value, None)
+            logging.getLogger("comicarr").error(
+                "Uncaught Exception", exc_info=(exc_type, exc_value, exc_traceback)
+            )
+            sys.__excepthook__(exc_type, exc_value, exc_traceback)
             return
 
         def initLogger(self, loglevel=1, log_dir=None, max_logsize=None, max_logfiles=None):
             import sys
 
-            sys.excepthook = RotatingLogger.handle_exception
+            sys.excepthook = self.handle_exception
 
             logging.getLogger("apscheduler.scheduler").setLevel(logging.WARN)
             logging.getLogger("apscheduler.threadpool").setLevel(logging.WARN)
@@ -175,6 +177,11 @@ if not LOG_LANG.startswith("en"):
         comicarr_log.log(message, "WARNING", *args, **kwargs)
 
     def error(message, *args, **kwargs):
+        comicarr_log.log(message, "ERROR", *args, **kwargs)
+
+    def exception(message, *args, **kwargs):
+        if "excinfo" in kwargs and "exc_info" not in kwargs:
+            kwargs["exc_info"] = kwargs.pop("excinfo")
         comicarr_log.log(message, "ERROR", *args, **kwargs)
 
 else:

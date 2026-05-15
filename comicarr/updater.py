@@ -34,7 +34,7 @@ from comicarr.tables import (
     comics,
     issues,
     jobhistory,
-    nzblog,
+    nzblog as nzblog_table,
     storyarcs,
     upcoming,
     weekly,
@@ -1232,7 +1232,7 @@ def nzblog(IssueID, NZBName, ComicName, SARC=None, IssueArcID=None, id=None, pro
         newValue["AltNZBName"] = alt_nzbname
 
     # check if it exists already in the log.
-    chkd = db.select_one(select(nzblog).where((nzblog.c.IssueID == IssueID) & (nzblog.c.PROVIDER == prov)))
+    chkd = db.select_one(select(nzblog_table).where((nzblog_table.c.IssueID == IssueID) & (nzblog_table.c.PROVIDER == prov)))
     if chkd is None:
         pass
     else:
@@ -1240,7 +1240,7 @@ def nzblog(IssueID, NZBName, ComicName, SARC=None, IssueArcID=None, id=None, pro
         if any([altnames is None, altnames == ""]):
             # we need to wipe the entry so we can re-update with the alt-nzbname if required
             with db.get_engine().begin() as conn:
-                conn.execute(nzblog.delete().where((nzblog.c.IssueID == IssueID) & (nzblog.c.PROVIDER == prov)))
+                conn.execute(nzblog_table.delete().where((nzblog_table.c.IssueID == IssueID) & (nzblog_table.c.PROVIDER == prov)))
             logger.fdebug("Deleted stale entry from nzblog for IssueID: " + str(IssueID) + " [" + prov + "]")
     db.upsert("nzblog", newValue, controlValue)
 

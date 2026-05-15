@@ -71,6 +71,14 @@ class CDH_MAP(object):
         except:
             pass
 
+    def _path_like_storage(self, path_value):
+        if isinstance(self.storage, pathlib.PureWindowsPath):
+            return pathlib.PureWindowsPath(path_value)
+        return pathlib.PurePosixPath(path_value)
+
+    def _join_destination(self, relative_path):
+        return self.sab_dir.joinpath(*relative_path.parts)
+
     def the_sequence(self):
         if self.sab is True:
             self.completedir()
@@ -133,21 +141,25 @@ class CDH_MAP(object):
         logger.fdebug("[CDH MAPPING] Destination root directory @: %s" % (self.sab_dir))
         logger.fdebug("sub_dir: %s" % self.subdir)
         try:
-            if self.subdir is False:
-                if cat_dir is None:
+            try:
+                maindir = self._path_like_storage(self.basedir)
+                file = self.storage.relative_to(maindir)
+            except (TypeError, ValueError):
+                if self.subdir is False:
+                    if cat_dir is None:
+                        maindir = self.storage.parents[1]
+                        file = self.storage.relative_to(maindir)
+                    else:
+                        maindir = self.storage.parents[0]
+                        file = pathlib.PurePath(self.storage.name)
+                else:
                     maindir = self.storage.parents[1]
                     file = self.storage.relative_to(maindir)
-                else:
-                    maindir = self.storage.parents[0]
-                    file = self.storage.name
-            else:
-                maindir = self.storage.parents[1]
-                file = self.storage.relative_to(maindir)
         except Exception as e:
             logger.warn("cdh-error: %s" % (e,))
         logger.fdebug("maindir: %s" % (maindir,))
         logger.fdebug("file: %s" % (file,))
-        final_dst = self.sab_dir.joinpath(file)
+        final_dst = self._join_destination(file)
         logger.fdebug("final_dst: %s" % (final_dst,))
         return final_dst
 

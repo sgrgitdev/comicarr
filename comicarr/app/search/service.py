@@ -28,6 +28,84 @@ from comicarr import db, logger
 from comicarr.tables import issues, ref32p
 
 
+def _utc_now_iso():
+    return datetime.datetime.utcnow().replace(microsecond=0).isoformat() + "Z"
+
+
+def _ensure_search_queue_status():
+    if not hasattr(comicarr, "SEARCH_QUEUE_STATUS_LOCK"):
+        import threading
+
+        comicarr.SEARCH_QUEUE_STATUS_LOCK = threading.Lock()
+    if not hasattr(comicarr, "SEARCH_QUEUE_STATUS"):
+        comicarr.SEARCH_QUEUE_STATUS = {
+            "active": None,
+            "started_at": None,
+            "last_completed": None,
+            "last_error": None,
+            "processed": 0,
+        }
+    return comicarr.SEARCH_QUEUE_STATUS_LOCK, comicarr.SEARCH_QUEUE_STATUS
+
+
+def _search_queue_item(item, position=None):
+    if not isinstance(item, dict):
+        return None
+    payload = {
+        "comicname": item.get("comicname"),
+        "seriesyear": item.get("seriesyear"),
+        "issuenumber": item.get("issuenumber"),
+        "issueid": item.get("issueid"),
+        "comicid": item.get("comicid"),
+        "booktype": item.get("booktype"),
+        "manual": item.get("manual", False),
+        "content_type": item.get("content_type"),
+        "chapter_number": item.get("chapter_number"),
+        "volume_number": item.get("volume_number"),
+    }
+    if position is not None:
+        payload["position"] = position
+    return payload
+
+
+def _set_search_active(item):
+    lock, status = _ensure_search_queue_status()
+    active = _search_queue_item(item, position=0)
+    now = _utc_now_iso()
+    with lock:
+        status["active"] = active
+        status["started_at"] = now
+        status["last_error"] = None
+    logger.info(
+        "[SEARCH-QUEUE] Searching %s #%s"
+        % (item.get("comicname", "unknown"), item.get("issuenumber", "unknown"))
+    )
+
+
+def _finish_search_active(item, result=None, error=None):
+    lock, status = _ensure_search_queue_status()
+    finished = _search_queue_item(item, position=0)
+    if finished is not None:
+        finished["finished_at"] = _utc_now_iso()
+        if error is not None:
+            finished["result"] = "error"
+            finished["error"] = str(error)
+        elif isinstance(result, dict) and result.get("status") is True:
+            finished["result"] = "found"
+        elif result == "local":
+            finished["result"] = "local"
+        elif result == "skipped":
+            finished["result"] = "skipped"
+        else:
+            finished["result"] = "not_found"
+    with lock:
+        status["last_completed"] = finished
+        status["last_error"] = str(error) if error is not None else None
+        status["active"] = None
+        status["started_at"] = None
+        status["processed"] = int(status.get("processed") or 0) + 1
+
+
 def find_comic(
     ctx, name, issue=None, type_="comic", mode="series", limit=None, offset=None, sort=None, content_type=None
 ):
@@ -139,7 +217,8 @@ def add_comic(ctx, comic_id):
     from comicarr import importer
 
     try:
-        watch = [{"comicid": comic_id, "comicname": None}]
+        comic_id = str(comic_id)
+        watch = [{"comicid": comic_id, "comicname": None, "seriesyear": None}]
         importer.importer_thread(watch)
     except Exception as e:
         logger.error("[SEARCH] Error adding comic %s: %s" % (comic_id, e))
@@ -181,10 +260,87 @@ def add_manga(ctx, manga_id):
 
 def force_search(ctx):
     """Trigger a full search for all wanted issues."""
+    import threading
+
     from comicarr import search
 
-    search.searchforissue()
-    return {"success": True, "message": "Search initiated"}
+    _, status = _ensure_search_queue_status()
+    active = status.get("active")
+    queue_size = comicarr.SEARCH_QUEUE.qsize()
+    if comicarr.SEARCHLOCK.locked() or queue_size > 0 or active is not None:
+        return {
+            "success": True,
+            "message": "A search is already running",
+            "status": "in_progress",
+            "queue_size": queue_size,
+            "active": active,
+        }
+
+    thread = threading.Thread(target=_run_force_search, args=(search,), name="ForceSearch", daemon=True)
+    thread.start()
+    return {
+        "success": True,
+        "message": "Search initiated",
+        "status": "started",
+        "queue_size": comicarr.SEARCH_QUEUE.qsize(),
+    }
+
+
+def _run_force_search(search_module):
+    try:
+        search_module.searchforissue()
+    except Exception as e:
+        logger.exception("[SEARCH] Force search failed: %s" % e)
+
+
+def get_search_queue(ctx, limit=100):
+    """Return a safe snapshot of the in-memory search queue."""
+    try:
+        limit = int(limit)
+    except (TypeError, ValueError):
+        limit = 100
+    if limit < 1:
+        limit = 1
+    if limit > 500:
+        limit = 500
+
+    with comicarr.SEARCH_QUEUE.mutex:
+        queued = list(comicarr.SEARCH_QUEUE.queue)
+
+    items = []
+    for index, item in enumerate(queued[:limit], start=1):
+        payload = _search_queue_item(item, position=index)
+        if payload is not None:
+            items.append(payload)
+
+    lock, status = _ensure_search_queue_status()
+    with lock:
+        active = status.get("active")
+        last_completed = status.get("last_completed")
+        last_error = status.get("last_error")
+        started_at = status.get("started_at")
+        processed = status.get("processed") or 0
+
+    active_seconds = None
+    if started_at:
+        try:
+            started = datetime.datetime.fromisoformat(started_at.rstrip("Z"))
+            active_seconds = int((datetime.datetime.utcnow() - started).total_seconds())
+        except (TypeError, ValueError):
+            active_seconds = None
+
+    return {
+        "locked": comicarr.SEARCHLOCK.locked(),
+        "size": len(queued),
+        "returned": len(items),
+        "active": active,
+        "started_at": started_at,
+        "active_seconds": active_seconds,
+        "processed": processed,
+        "last_completed": last_completed,
+        "last_error": last_error,
+        "items": items,
+    }
 
 
 def force_rss(ctx):
@@ -635,6 +791,9 @@ def search_queue(queue):
     import queue as queue_module
 
     while True:
+        item = None
+        result = None
+        error = None
         try:
             item = queue.get(timeout=5)
         except queue_module.Empty:
@@ -642,68 +801,76 @@ def search_queue(queue):
 
         if item == "exit":
             logger.info("[SEARCH-QUEUE] Cleaning up workers for shutdown")
+            queue.task_done()
             break
 
         if comicarr.SEARCHLOCK.locked():
             queue.put(item)  # re-enqueue
+            queue.task_done()
             time.sleep(1)
             continue
 
+        try:
+            _set_search_active(item)
+            issueid = item.get("issueid")
             gumbo_line = True
-            if item["issueid"] in comicarr.PACK_ISSUEIDS_DONT_QUEUE:
-                if comicarr.PACK_ISSUEIDS_DONT_QUEUE[item["issueid"]] in comicarr.DDL_QUEUED:
+            if issueid in comicarr.PACK_ISSUEIDS_DONT_QUEUE:
+                if comicarr.PACK_ISSUEIDS_DONT_QUEUE[issueid] in comicarr.DDL_QUEUED:
                     logger.fdebug(
-                        "[SEARCH-QUEUE-PACK-DETECTION] %s already queued to download via pack...Ignoring"
-                        % item["issueid"]
+                        "[SEARCH-QUEUE-PACK-DETECTION] %s already queued to download via pack...Ignoring" % issueid
                     )
                     gumbo_line = False
 
-            if gumbo_line:
-                logger.fdebug("[SEARCH-QUEUE] Now loading item from search queue: %s" % item)
-                if not comicarr.SEARCHLOCK.locked():
-                    arcid = None
-                    comicid = item["comicid"]
-                    issueid = item["issueid"]
-                    if issueid is not None:
-                        if "_" in issueid:
-                            arcid = issueid
-                            comicid = None  # required for storyarcs to work
-                            issueid = None  # required for storyarcs to work
-                    mofo = comicarr.filers.FileHandlers(ComicID=comicid, IssueID=issueid, arcID=arcid)
-                    local_check = mofo.walk_the_walk()
+            if not gumbo_line:
+                result = "skipped"
+                continue
 
-                    if local_check["status"]:
-                        from comicarr.helpers import check_file_condition
+            logger.fdebug("[SEARCH-QUEUE] Now loading item from search queue: %s" % item)
+            arcid = None
+            comicid = item.get("comicid")
+            if issueid is not None and "_" in str(issueid):
+                arcid = issueid
+                comicid = None  # required for storyarcs to work
+                issueid = None  # required for storyarcs to work
 
-                        fullpath = Path(local_check["filepath"]) / local_check["filename"]
-                        filecondition = check_file_condition(fullpath)
-                        if not filecondition["status"]:
-                            logger.warn(
-                                f"CRC Check: File {fullpath} failed condition check ({filecondition['quality']}).  Ignoring."
-                            )
-                            local_check["status"] = False
+            mofo = comicarr.filers.FileHandlers(ComicID=comicid, IssueID=issueid, arcID=arcid)
+            local_check = mofo.walk_the_walk()
 
-                    if local_check["status"] is True:
-                        comicarr.PP_QUEUE.put(
-                            {
-                                "nzb_name": local_check["filename"],
-                                "nzb_folder": local_check["filepath"],
-                                "failed": False,
-                                "issueid": item["issueid"],
-                                "comicid": item["comicid"],
-                                "apicall": True,
-                                "ddl": False,
-                                "download_info": None,
-                            }
-                        )
-                    else:
-                        try:
-                            manual = item["manual"]
-                        except Exception:
-                            manual = False
-                        comicarr.search.searchforissue(item["issueid"], manual=manual)
-                    time.sleep(5)
+            if local_check["status"]:
+                from comicarr.helpers import check_file_condition
 
+                fullpath = Path(local_check["filepath"]) / local_check["filename"]
+                filecondition = check_file_condition(fullpath)
+                if not filecondition["status"]:
+                    logger.warn(
+                        f"CRC Check: File {fullpath} failed condition check ({filecondition['quality']}). Ignoring."
+                    )
+                    local_check["status"] = False
+
+            if local_check["status"] is True:
+                comicarr.PP_QUEUE.put(
+                    {
+                        "nzb_name": local_check["filename"],
+                        "nzb_folder": local_check["filepath"],
+                        "failed": False,
+                        "issueid": item.get("issueid"),
+                        "comicid": item.get("comicid"),
+                        "apicall": True,
+                        "ddl": False,
+                        "download_info": None,
+                    }
+                )
+                result = "local"
+            else:
+                manual = item.get("manual", False)
+                result = comicarr.search.searchforissue(item.get("issueid"), manual=manual)
+            time.sleep(5)
+        except Exception as e:
+            error = e
+            logger.exception("[SEARCH-QUEUE] Error processing item %s: %s" % (item, e))
+        finally:
+            _finish_search_active(item, result=result, error=error)
+            queue.task_done()
             if comicarr.SEARCHLOCK.locked():
                 logger.fdebug("[SEARCH-QUEUE] Another item is currently being searched....")
                 time.sleep(15)

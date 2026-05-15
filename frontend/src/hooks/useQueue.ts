@@ -59,10 +59,10 @@ export function useBulkQueueIssues(): UseMutationResult<void, Error, string[]> {
   const queryClient = useQueryClient();
   return useMutation({
     mutationFn: async (issueIds: string[]) => {
-      // Process sequentially to avoid rate limiting
-      for (const id of issueIds) {
-        await apiRequest("PUT", `/api/series/issues/${id}/queue`);
-      }
+      await apiRequest("POST", "/api/series/issues/bulk-queue", {
+        ids: issueIds,
+        search: false,
+      });
     },
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["wanted"] });
@@ -80,10 +80,9 @@ export function useBulkUnqueueIssues(): UseMutationResult<
   const queryClient = useQueryClient();
   return useMutation({
     mutationFn: async (issueIds: string[]) => {
-      // Process sequentially to avoid rate limiting
-      for (const id of issueIds) {
-        await apiRequest("PUT", `/api/series/issues/${id}/unqueue`);
-      }
+      await apiRequest("POST", "/api/series/issues/bulk-unqueue", {
+        ids: issueIds,
+      });
     },
     onSuccess: () => {
       queryClient.invalidateQueries({ queryKey: ["wanted"] });

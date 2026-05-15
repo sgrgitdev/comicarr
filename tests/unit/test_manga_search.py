@@ -25,6 +25,26 @@ def _build():
     return _build_manga_search_terms
 
 
+def _local_host_check():
+    from comicarr.search import _is_local_indexer_host
+
+    return _is_local_indexer_host
+
+
+class TestLocalIndexerHost:
+    def test_host_docker_internal_is_local(self):
+        is_local = _local_host_check()
+        assert is_local("http://host.docker.internal:9696/1/api") is True
+
+    def test_private_lan_host_is_local(self):
+        is_local = _local_host_check()
+        assert is_local("http://192.168.68.247:9696/1/api") is True
+
+    def test_public_host_is_not_local(self):
+        is_local = _local_host_check()
+        assert is_local("https://example.com/api") is False
+
+
 class TestBuildMangaSearchTermsChapterOnly:
     """When only a chapter number is provided (no volume)."""
 
@@ -32,13 +52,16 @@ class TestBuildMangaSearchTermsChapterOnly:
         build = _build()
         terms = build("One Piece", "1044", None)
         assert '"One Piece" c1044' not in terms  # not quoted — raw name
+        assert "One Piece 1044" in terms
         assert "One Piece c1044" in terms
         assert "One Piece chapter 1044" in terms
 
     def test_single_digit_chapter_is_zero_padded(self):
         build = _build()
         terms = build("Naruto", "5", None)
+        assert "Naruto 5" in terms
         assert "Naruto c005" in terms
+        assert "Naruto c5" in terms
         assert "Naruto chapter 005" in terms
 
     def test_two_digit_chapter_is_zero_padded(self):
@@ -161,3 +184,11 @@ class TestBuildMangaSearchTermsEdgeCases:
         volume_idx = terms.index("Series v05")
         assert combined_idx < chapter_idx
         assert combined_idx < volume_idx
+
+    def test_colon_title_generates_aliases(self):
+        build = _build()
+        terms = build("Demon Slayer: Kimetsu no Yaiba", "244", None)
+        assert "Demon Slayer: Kimetsu no Yaiba 244" in terms
+        assert "Demon Slayer Kimetsu no Yaiba 244" in terms
+        assert "Demon Slayer 244" in terms
+        assert "Kimetsu no Yaiba 244" in terms

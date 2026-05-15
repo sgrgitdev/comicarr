@@ -1096,9 +1096,14 @@ def cdh_monitor(queue, item, nzstat, readd=False):
     elif nzstat["status"] is True:
         if nzstat["failed"] is False:
             fullpath = Path(nzstat["location"]) / nzstat["name"]
-            filecondition = check_file_condition(fullpath)
-            if not filecondition["status"]:
-                nzstat["failed"] = True
+            if fullpath.exists() and fullpath.is_file():
+                filecondition = check_file_condition(fullpath)
+                if not filecondition["status"]:
+                    nzstat["failed"] = True
+            else:
+                logger.fdebug(
+                    "Exact completed file %s not found; deferring folder scan to post-processing." % fullpath
+                )
         if nzstat["failed"] is False:
             logger.info("File successfully downloaded - now initiating completed downloading handling.")
         else:

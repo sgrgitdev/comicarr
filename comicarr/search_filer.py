@@ -42,6 +42,7 @@ class search_check(object):
             IssueDate = is_info["IssueDate"]
             digitaldate = is_info["digitaldate"]
             booktype = is_info["booktype"]
+            content_type = is_info.get("content_type")
             ignore_booktype = is_info["ignore_booktype"]
             SeriesYear = is_info["SeriesYear"]
             ComicVersion = is_info["ComicVersion"]
@@ -62,6 +63,9 @@ class search_check(object):
             intIss = is_info["intIss"]
             chktpb = is_info["chktpb"]
             provider_stat = is_info["provider_stat"]
+            is_manga = str(content_type or "").lower() == "manga" or str(booktype or "").lower() == "manga"
+        else:
+            is_manga = False
 
         try:
             pack = entry["pack"]
@@ -208,7 +212,13 @@ class search_check(object):
         else:
             # use store date instead of publication date for comparisons since
             # publication date is usually +2 months
-            if StoreDate is None or StoreDate == "0000-00-00":
+            if is_manga and (StoreDate is None or StoreDate == "0000-00-00") and (
+                IssueDate is None or IssueDate == "0000-00-00"
+            ):
+                logger.fdebug("[MANGA] No chapter date available; bypassing store-date comparison.")
+                postdate_int = None
+                issuedate_int = None
+            elif StoreDate is None or StoreDate == "0000-00-00":
                 if IssueDate is None or IssueDate == "0000-00-00":
                     logger.fdebug(
                         "Invalid store date & issue date detected - you"
@@ -222,118 +232,121 @@ class search_check(object):
             else:
                 stdate = StoreDate
                 logger.fdebug("store date used is : %s" % stdate)
-            logger.fdebug("date used is : %s" % stdate)
+            if not (is_manga and (StoreDate is None or StoreDate == "0000-00-00") and (
+                IssueDate is None or IssueDate == "0000-00-00"
+            )):
+                logger.fdebug("date used is : %s" % stdate)
 
-            postdate_int = None
-            if all(["DDL" in nzbprov, len(pubdate) == 10]):
-                postdate_int = pubdate
-                logger.fdebug("[%s] postdate_int (%s): %s" % (nzbprov, type(postdate_int), postdate_int))
-            if any([postdate_int is None, type(postdate_int) != int]) or not RSS == "no":
-                # convert it to a tuple
-                dateconv = email.utils.parsedate_tz(pubdate)
+                postdate_int = None
+                if all(["DDL" in nzbprov, len(pubdate) == 10]):
+                    postdate_int = pubdate
+                    logger.fdebug("[%s] postdate_int (%s): %s" % (nzbprov, type(postdate_int), postdate_int))
+                if any([postdate_int is None, type(postdate_int) != int]) or not RSS == "no":
+                    # convert it to a tuple
+                    dateconv = email.utils.parsedate_tz(pubdate)
 
-                try:
-                    dateconv2 = datetime.datetime(*dateconv[:6])
-                except TypeError as e:
-                    logger.warn("Unable to convert timestamp from : %s [%s]" % ((dateconv,), e))
-                try:
-                    # convert it to a numeric time, then subtract the
-                    # timezone difference (+/- GMT)
-                    if dateconv[-1] is not None:
-                        postdate_int = time.mktime(dateconv[: len(dateconv) - 1]) - dateconv[-1]
+                    try:
+                        dateconv2 = datetime.datetime(*dateconv[:6])
+                    except TypeError as e:
+                        logger.warn("Unable to convert timestamp from : %s [%s]" % ((dateconv,), e))
+                    try:
+                        # convert it to a numeric time, then subtract the
+                        # timezone difference (+/- GMT)
+                        if dateconv[-1] is not None:
+                            postdate_int = time.mktime(dateconv[: len(dateconv) - 1]) - dateconv[-1]
+                        else:
+                            postdate_int = time.mktime(dateconv[: len(dateconv) - 1])
+                    except Exception as e:
+                        logger.warn(
+                            "Unable to parse posting date from provider result set"
+                            " for : %s. Error returned: %s" % (entry["title"], e)
+                        )
+                        return None
+
+                if all([digitaldate != "0000-00-00", digitaldate is not None]):
+                    i = 0
+                else:
+                    digitaldate_int = "00000000"
+                    i = 1
+
+                while i <= 1:
+                    if i == 0:
+                        usedate = digitaldate
                     else:
-                        postdate_int = time.mktime(dateconv[: len(dateconv) - 1])
-                except Exception as e:
-                    logger.warn(
-                        "Unable to parse posting date from provider result set"
-                        " for : %s. Error returned: %s" % (entry["title"], e)
-                    )
-                    return None
-
-            if all([digitaldate != "0000-00-00", digitaldate is not None]):
-                i = 0
-            else:
-                digitaldate_int = "00000000"
-                i = 1
-
-            while i <= 1:
-                if i == 0:
-                    usedate = digitaldate
-                else:
-                    usedate = stdate
-                logger.fdebug("usedate: %s" % usedate)
-                # convert it to a Thu, 06 Feb 2014 00:00:00 format
-                issue_converted = datetime.datetime.strptime(usedate.rstrip(), "%Y-%m-%d")
-                issue_convert = issue_converted + datetime.timedelta(days=-1)
-                # to get past different locale's os-dependent dates, let's
-                # convert it to a generic datetime format
-                try:
-                    stamp = time.mktime(issue_convert.timetuple())
-                    issconv = format_date_time(stamp)
-                except OverflowError as e:
-                    logger.fdebug("Error converting the timestamp into a generic format: %s" % e)
-                    issconv = issue_convert.strftime("%a, %d %b %Y %H:%M:%S")
-                # convert it to a tuple
-                econv = email.utils.parsedate_tz(issconv)
-                econv2 = datetime.datetime(*econv[:6])
-                # convert it to a numeric and drop the GMT/Timezone
-                try:
-                    usedate_int = time.mktime(econv[: len(econv) - 1])
-                except OverflowError:
-                    logger.fdebug("Unable to convert timestamp to integer format. Forcing things through.")
-                    isyear = econv[1]
-                    epochyr = "1970"
-                    if int(isyear) <= int(epochyr):
-                        tm = datetime.datetime(1970, 1, 1)
-                        try:
-                            usedate_int = int(time.mktime(tm.timetuple()))
-                        except Exception as e:
-                            logger.warn("[%s] Failed to convert tm of [%s]" % (e, tm))
-                            logger.fdebug("issconv: %s" % issconv)
-                            diff = issue_convert - tm
-                            logger.fdebug("diff: %s" % diff)
-                            usedate_int = diff.total_seconds()
+                        usedate = stdate
+                    logger.fdebug("usedate: %s" % usedate)
+                    # convert it to a Thu, 06 Feb 2014 00:00:00 format
+                    issue_converted = datetime.datetime.strptime(usedate.rstrip(), "%Y-%m-%d")
+                    issue_convert = issue_converted + datetime.timedelta(days=-1)
+                    # to get past different locale's os-dependent dates, let's
+                    # convert it to a generic datetime format
+                    try:
+                        stamp = time.mktime(issue_convert.timetuple())
+                        issconv = format_date_time(stamp)
+                    except OverflowError as e:
+                        logger.fdebug("Error converting the timestamp into a generic format: %s" % e)
+                        issconv = issue_convert.strftime("%a, %d %b %Y %H:%M:%S")
+                    # convert it to a tuple
+                    econv = email.utils.parsedate_tz(issconv)
+                    econv2 = datetime.datetime(*econv[:6])
+                    # convert it to a numeric and drop the GMT/Timezone
+                    try:
+                        usedate_int = time.mktime(econv[: len(econv) - 1])
+                    except OverflowError:
+                        logger.fdebug("Unable to convert timestamp to integer format. Forcing things through.")
+                        isyear = econv[1]
+                        epochyr = "1970"
+                        if int(isyear) <= int(epochyr):
+                            tm = datetime.datetime(1970, 1, 1)
+                            try:
+                                usedate_int = int(time.mktime(tm.timetuple()))
+                            except Exception as e:
+                                logger.warn("[%s] Failed to convert tm of [%s]" % (e, tm))
+                                logger.fdebug("issconv: %s" % issconv)
+                                diff = issue_convert - tm
+                                logger.fdebug("diff: %s" % diff)
+                                usedate_int = diff.total_seconds()
+                        else:
+                            continue
+                    if i == 0:
+                        digitaldate_int = usedate_int
+                        digconv2 = econv2
                     else:
-                        continue
-                if i == 0:
-                    digitaldate_int = usedate_int
-                    digconv2 = econv2
-                else:
-                    issuedate_int = usedate_int
-                    issconv2 = econv2
-                i += 1
+                        issuedate_int = usedate_int
+                        issconv2 = econv2
+                    i += 1
 
-            try:
-                # try new method to get around issues populating in a diff
-                # timezone thereby putting them in a different day.
-                # logger.info('digitaldate: %s' % digitaldate)
-                # logger.info('dateconv2: %s' % dateconv2.date())
-                # logger.info('digconv2: %s' % digconv2.date())
-                if digitaldate != "0000-00-00" and dateconv2.date() >= digconv2.date():
-                    logger.fdebug("%s is after DIGITAL store date of %s" % (pubdate, digitaldate))
-                elif dateconv2.date() < issconv2.date():
-                    logger.fdebug("[CONV] pubdate: %s  < storedate: %s" % (dateconv2.date(), issconv2.date()))
-                    logger.fdebug(
-                        "%s is before store date of %s. Ignoring search result"
-                        " as this is not the right issue." % (pubdate, stdate)
-                    )
-                    return None
-                else:
-                    logger.fdebug("[CONV] %s is after store date of %s" % (pubdate, stdate))
-            except Exception:
-                # if the above fails, drop down to the integer compare method
-                # as a failsafe.
-                if digitaldate is not None and all([digitaldate != "0000-00-00", postdate_int >= digitaldate_int]):
-                    logger.fdebug("%s is after DIGITAL store date of %s" % (pubdate, digitaldate))
-                elif postdate_int < issuedate_int:
-                    logger.fdebug("[INT]pubdate: %s  < storedate: %s" % (postdate_int, issuedate_int))
-                    logger.fdebug(
-                        "%s is before store date of %s. Ignoring search result"
-                        " as this is not the right issue." % (pubdate, stdate)
-                    )
-                    return None
-                else:
-                    logger.fdebug("[INT] %s is after store date of %s" % (pubdate, stdate))
+                try:
+                    # try new method to get around issues populating in a diff
+                    # timezone thereby putting them in a different day.
+                    # logger.info('digitaldate: %s' % digitaldate)
+                    # logger.info('dateconv2: %s' % dateconv2.date())
+                    # logger.info('digconv2: %s' % digconv2.date())
+                    if digitaldate != "0000-00-00" and dateconv2.date() >= digconv2.date():
+                        logger.fdebug("%s is after DIGITAL store date of %s" % (pubdate, digitaldate))
+                    elif dateconv2.date() < issconv2.date():
+                        logger.fdebug("[CONV] pubdate: %s  < storedate: %s" % (dateconv2.date(), issconv2.date()))
+                        logger.fdebug(
+                            "%s is before store date of %s. Ignoring search result"
+                            " as this is not the right issue." % (pubdate, stdate)
+                        )
+                        return None
+                    else:
+                        logger.fdebug("[CONV] %s is after store date of %s" % (pubdate, stdate))
+                except Exception:
+                    # if the above fails, drop down to the integer compare method
+                    # as a failsafe.
+                    if digitaldate is not None and all([digitaldate != "0000-00-00", postdate_int >= digitaldate_int]):
+                        logger.fdebug("%s is after DIGITAL store date of %s" % (pubdate, digitaldate))
+                    elif postdate_int < issuedate_int:
+                        logger.fdebug("[INT]pubdate: %s  < storedate: %s" % (postdate_int, issuedate_int))
+                        logger.fdebug(
+                            "%s is before store date of %s. Ignoring search result"
+                            " as this is not the right issue." % (pubdate, stdate)
+                        )
+                        return None
+                    else:
+                        logger.fdebug("[INT] %s is after store date of %s" % (pubdate, stdate))
         # -- end size constaints.
         if "(digital first)" in ComicTitle.lower():
             dig_moving = re.sub(r"\(digital first\)", "", ComicTitle.lower()).strip()
@@ -387,6 +400,8 @@ class search_check(object):
         if parsed_comic["parse_status"] == "success" and (
             all([booktype is None, parsed_comic["booktype"] == "issue"])
             or all([booktype == "Print", parsed_comic["booktype"] == "issue"])
+            or all([is_manga, parsed_comic["booktype"] in ("issue", "manga")])
+            or str(booktype or "").lower() == str(parsed_comic["booktype"] or "").lower()
             or all(
                 [
                     booktype == "One-Shot",
@@ -478,6 +493,9 @@ class search_check(object):
             logger.fdebug(
                 "Series Year not provided but Series Volume detected of %s. Bypassing Year Match." % fndcomicversion
             )
+            yearmatch = True
+        elif is_manga:
+            logger.fdebug("[MANGA] Bypassing year check for manga chapter matching.")
             yearmatch = True
         elif ComVersChk == 0 and parsed_comic["issue_year"] is None:
             logger.fdebug(

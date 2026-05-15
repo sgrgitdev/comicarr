@@ -60,6 +60,8 @@ def get_comic_detail(ctx, comic_id):
 
 def add_comic(ctx, comic_id):
     """Add a comic to the watchlist (background thread via importer)."""
+    comic_id = str(comic_id)
+
     # Strip CV prefix if present
     if comic_id.startswith("4050-"):
         comic_id = re.sub("4050-", "", comic_id).strip()
@@ -67,7 +69,7 @@ def add_comic(ctx, comic_id):
     from comicarr import importer
 
     try:
-        watch = [{"comicid": comic_id, "comicname": None}]
+        watch = [{"comicid": comic_id, "comicname": None, "seriesyear": None}]
         importer.importer_thread(watch)
     except Exception as e:
         logger.error("[SERIES] Error adding comic %s: %s" % (comic_id, e))
@@ -181,6 +183,66 @@ def unqueue_issue(ctx, issue_id):
     """Mark an issue as Skipped."""
     series_queries.unqueue_issue(issue_id)
     return {"success": True}
+
+
+def bulk_queue_issues(ctx, issue_ids, trigger_search=False):
+    """Mark multiple issues as Wanted, optionally triggering searches."""
+    queued = 0
+    queued_issue_ids = []
+    errors = []
+
+    for issue_id in issue_ids:
+        try:
+            issue_id = str(issue_id)
+            series_queries.queue_issue(issue_id)
+            queued += 1
+            queued_issue_ids.append(issue_id)
+        except Exception as e:
+            errors.append({"id": str(issue_id), "error": str(e)})
+
+    searched = 0
+    if trigger_search and queued_issue_ids:
+        from comicarr import search
+
+        search.searchIssueIDList(queued_issue_ids)
+        searched = len(queued_issue_ids)
+
+    return {"success": queued > 0, "queued": queued, "searched": searched, "errors": errors}
+
+
+def bulk_unqueue_issues(ctx, issue_ids):
+    """Mark multiple issues as Skipped."""
+    skipped = 0
+    errors = []
+
+    for issue_id in issue_ids:
+        try:
+            series_queries.unqueue_issue(str(issue_id))
+            skipped += 1
+        except Exception as e:
+            errors.append({"id": str(issue_id), "error": str(e)})
+
+    return {"success": skipped > 0, "skipped": skipped, "errors": errors}
+
+
+def queue_missing_for_series(ctx, comic_id, limit=None, trigger_search=False):
+    """Mark skipped issues in a series as Wanted."""
+    from sqlalchemy import select
+
+    stmt = (
+        select(issues.c.IssueID)
+        .where(issues.c.ComicID == str(comic_id), issues.c.Status == "Skipped")
+        .order_by(issues.c.Int_IssueNumber.asc())
+    )
+
+    if limit is not None:
+        stmt = stmt.limit(int(limit))
+
+    issue_ids = [row["IssueID"] for row in db.select_all(stmt)]
+    result = bulk_queue_issues(ctx, issue_ids, trigger_search=trigger_search)
+    result["comic_id"] = str(comic_id)
+    result["selected"] = len(issue_ids)
+    return result
 
 
 def get_wanted(ctx, limit=None, offset=None, include_story_arcs=False):

@@ -13,7 +13,7 @@ Search domain router — provider search, RSS monitoring.
 Depends on series domain for cross-domain lookups (Phase 5).
 """
 
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, Query
 from fastapi.responses import JSONResponse
 
 from comicarr.app.core.context import AppContext, get_context
@@ -147,6 +147,12 @@ def force_rss(ctx: AppContext = Depends(get_context)):
     if not result["success"]:
         return JSONResponse(status_code=500, content={"detail": result.get("error")})
     return result
+
+
+@router.get("/queue", dependencies=[Depends(require_session)])
+def get_search_queue(limit: int = Query(100, ge=1, le=500), ctx: AppContext = Depends(get_context)):
+    """Get current search queue status."""
+    return search_service.get_search_queue(ctx, limit=limit)
 
 
 @router.get("/providers", dependencies=[Depends(require_session)])

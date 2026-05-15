@@ -40,6 +40,7 @@ from datetime import timedelta
 
 import requests
 from apscheduler.schedulers.background import BackgroundScheduler
+from apscheduler.schedulers.base import SchedulerNotRunningError
 from apscheduler.triggers.interval import IntervalTrigger
 from sqlalchemy import inspect, text
 from sqlalchemy.exc import OperationalError, ProgrammingError
@@ -233,6 +234,14 @@ SNATCHED_QUEUE = queue.Queue()
 NZB_QUEUE = queue.Queue()
 PP_QUEUE = queue.Queue()
 SEARCH_QUEUE = queue.Queue()
+SEARCH_QUEUE_STATUS_LOCK = threading.Lock()
+SEARCH_QUEUE_STATUS = {
+    "active": None,
+    "started_at": None,
+    "last_completed": None,
+    "last_error": None,
+    "processed": 0,
+}
 DDL_QUEUE = queue.Queue()
 RETURN_THE_NZBQUEUE = queue.Queue()
 MASS_ADD = None
@@ -1733,7 +1742,10 @@ def halt():
     with INIT_LOCK:
         if _INITIALIZED:
             logger.info("Shutting down the background schedulers...")
-            SCHED.shutdown(wait=False)
+            try:
+                SCHED.shutdown(wait=False)
+            except SchedulerNotRunningError:
+                logger.fdebug("Background scheduler was already stopped.")
 
             queue_schedule("all", "shutdown")
             # if NZBPOOL is not None:

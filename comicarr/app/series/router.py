@@ -195,6 +195,63 @@ def unqueue_issue(issue_id: str, ctx: AppContext = Depends(get_context)):
     return series_service.unqueue_issue(ctx, issue_id)
 
 
+@router.post("/series/issues/bulk-queue", dependencies=[Depends(require_session)])
+def bulk_queue_issues(
+    request_body: dict = None,
+    ctx: AppContext = Depends(get_context),
+):
+    """Mark multiple issues as Wanted."""
+    if request_body is None:
+        request_body = {}
+
+    ids, error = _validate_bulk_ids(request_body)
+    if error:
+        return error
+
+    trigger_search = bool(request_body.get("search", False))
+    return series_service.bulk_queue_issues(ctx, ids, trigger_search=trigger_search)
+
+
+@router.post("/series/issues/bulk-unqueue", dependencies=[Depends(require_session)])
+def bulk_unqueue_issues(
+    request_body: dict = None,
+    ctx: AppContext = Depends(get_context),
+):
+    """Mark multiple issues as Skipped."""
+    if request_body is None:
+        request_body = {}
+
+    ids, error = _validate_bulk_ids(request_body)
+    if error:
+        return error
+
+    return series_service.bulk_unqueue_issues(ctx, ids)
+
+
+@router.post("/series/{comic_id}/queue-missing", dependencies=[Depends(require_session)])
+def queue_missing_series(
+    comic_id: str,
+    request_body: dict = None,
+    ctx: AppContext = Depends(get_context),
+):
+    """Mark skipped issues in a series as Wanted."""
+    if request_body is None:
+        request_body = {}
+
+    limit = request_body.get("limit")
+    trigger_search = bool(request_body.get("search", False))
+
+    try:
+        return series_service.queue_missing_for_series(
+            ctx,
+            comic_id,
+            limit=limit,
+            trigger_search=trigger_search,
+        )
+    except ValueError:
+        return JSONResponse(status_code=422, content={"detail": "limit must be a number"})
+
+
 @router.get("/wanted", dependencies=[Depends(require_session)])
 def get_wanted(
     limit: int = Query(None),
