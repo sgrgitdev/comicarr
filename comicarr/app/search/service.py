@@ -888,7 +888,7 @@ def search_queue(queue):
                 issueid = None  # required for storyarcs to work
 
             mofo = comicarr.filers.FileHandlers(ComicID=comicid, IssueID=issueid, arcID=arcid)
-            local_check = mofo.walk_the_walk()
+            local_check = mofo.walk_the_walk(allow_refresh=False)
 
             if local_check["status"]:
                 from comicarr.helpers import check_file_condition

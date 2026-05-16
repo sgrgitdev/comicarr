@@ -32,7 +32,7 @@ from comicarr.tables import annuals, comics, issues, search_job_items, search_jo
 ACTIVE_ITEM_STATUSES = {"queued", "running"}
 TERMINAL_JOB_STATUSES = {"completed", "completed_with_errors", "cancelled", "empty", "error"}
 PROTECTED_ISSUE_STATUSES = {"Downloaded", "Snatched", "Archived"}
-DEFAULT_STALE_RUNNING_SECONDS = 30 * 60
+DEFAULT_STALE_RUNNING_SECONDS = 10 * 60
 
 
 def _now() -> str:

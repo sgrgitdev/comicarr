@@ -173,7 +173,7 @@ def get_http_session():
     return _http_session
 
 
-DEFAULT_SEARCH_ITEM_TIMEOUT_SECONDS = 20 * 60
+DEFAULT_SEARCH_ITEM_TIMEOUT_SECONDS = 10 * 60
 
 
 def _search_item_timeout_seconds():

@@ -926,7 +926,7 @@ class FileHandlers(object):
 
         return secondaryfolders
 
-    def walk_the_walk(self):
+    def walk_the_walk(self, allow_refresh=True):
         folder_location = comicarr.CONFIG.FOLDER_CACHE_LOCATION
         if folder_location is None:
             return {"status": False}
@@ -945,6 +945,9 @@ class FileHandlers(object):
                 filelist = comicarr.FOLDER_CACHE
 
         if filelist is None:
+            if not allow_refresh:
+                logger.info("Skipping local folder scan because folder cache is empty/stale and refresh is disabled.")
+                return {"status": False}
             logger.info("generating new directory listing for folder_cache")
             flc = filechecker.FileChecker(folder_location, justparse=True, pp_mode=True)
             comicarr.FOLDER_CACHE = flc.listFiles()
